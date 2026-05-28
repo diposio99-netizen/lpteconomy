@@ -8,15 +8,15 @@ discord.py==2.3.2
 aiosqlite==0.19.0
 python-dotenv==1.0.0
 Pillow==10.2.0
-“”“,
+""",
 
-”.env”: “””
+".env”: """
 DISCORD_TOKEN=
 PREFIX=!
 OWNER_ID=YOUR_DISCORD_ID
-“”“,
+""",
 
-“config.py”: “””
+"config.py”: """
 import os
 from dotenv import load_dotenv
 
@@ -55,10 +55,10 @@ COLOR_PURPLE = 0x9b59b6
 COLOR_ORANGE = 0xe67e22
 
 RARITY_DATA = {
-    ‘common’:    {‘color’: 0x95a5a6, ‘label’: ‘Обычный’,    ‘emoji’: “},
-    ‘rare’:      {‘color’: 0x3498db, ‘label’: ‘Редкий’,      ‘emoji’: “},
-    ‘epic’:      {‘color’: 0x9b59b6, ‘label’: ‘Эпический’,   ‘emoji’: “},
-    ‘legendary’: {‘color’: 0xf1c40f, ‘label’: ‘Легендарный’, ‘emoji’: “},
+    ‘common’:    {‘color’: 0x95a5a6, ‘label’: ‘Обычный’,    ‘emoji’: "},
+    ‘rare’:      {‘color’: 0x3498db, ‘label’: ‘Редкий’,      ‘emoji’: "},
+    ‘epic’:      {‘color’: 0x9b59b6, ‘label’: ‘Эпический’,   ‘emoji’: "},
+    ‘legendary’: {‘color’: 0xf1c40f, ‘label’: ‘Легендарный’, ‘emoji’: "},
 }
 
 JOBS = {
@@ -143,9 +143,9 @@ JOBS = {
         ]
     },
 }
-“”“,
+""",
 
-“database/schema.sql”: “””
+"database/schema.sql”: """
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS users (
@@ -264,9 +264,9 @@ INSERT OR IGNORE INTO case_items (case_id, item_name, rarity, reward_type, rewar
     (3, ‘2000 монет’,  ‘rare’,      ‘coins’, ‘2000’,  30),
     (3, ‘7000 монет’,  ‘epic’,      ‘coins’, ‘7000’,  15),
     (3, ‘25000 монет’, ‘legendary’, ‘coins’, ‘25000’,  5);
-“”“,
+""",
 
-“database/db.py”: “””
+"database/db.py”: """
 import aiosqlite
 import config
 
@@ -401,13 +401,13 @@ async def get_leaderboard(limit=10):
             (limit,)
         ) as cur:
             return [dict® for r in await cur.fetchall()]
-“”“,
+""",
 
-“utils/init.py”: “”,
-“database/init.py”: “”,
-“cogs/init.py”: “”,
+"utils/init.py”: "",
+"database/init.py”: "",
+"cogs/init.py”: "",
 
-“utils/animations.py”: “””
+"utils/animations.py”: """
 import asyncio
 import random
 import discord
