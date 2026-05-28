@@ -1,23 +1,20 @@
+"`python
+import os
+
 FILES = {
 
-════════════════════════════════════════════════════════════════
-
-“requirements.txt”: “””
+"requirements.txt": """
 discord.py==2.3.2
 aiosqlite==0.19.0
 python-dotenv==1.0.0
 Pillow==10.2.0
 “”“,
 
-════════════════════════════════════════════════════════════════
-
 ”.env”: “””
-DISCORD_TOKEN=ВАШ_ТОКЕН_ЗДЕСЬ
+DISCORD_TOKEN=
 PREFIX=!
-OWNER_ID=ВАШ_DISCORD_ID
+OWNER_ID=YOUR_DISCORD_ID
 “”“,
-
-════════════════════════════════════════════════════════════════
 
 “config.py”: “””
 import os
@@ -25,130 +22,128 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-TOKEN     = os.getenv(‘DISCORD_TOKEN’)
-PREFIX    = os.getenv(‘PREFIX’, ‘!’)
-OWNER_ID  = int(os.getenv(‘OWNER_ID’, 0))
-DB_PATH   = ‘database/bot.db’
+TOKEN = os.getenv(‘DISCORD_TOKEN’)
+PREFIX = os.getenv(‘PREFIX’, ‘!’)
+OWNER_ID = int(os.getenv(‘OWNER_ID’, 0))
+DB_PATH = ‘database/bot.db’
 
-STARTING_BALANCE  = 100
-DAILY_REWARD      = 500
-WEEKLY_REWARD     = 2500
-WORK_COOLDOWN     = 3600
-WORK_MIN          = 50
-WORK_MAX          = 200
+STARTING_BALANCE = 100
+DAILY_REWARD = 500
+WEEKLY_REWARD = 2500
+WORK_COOLDOWN = 3600
+WORK_MIN = 50
+WORK_MAX = 200
 
-MSG_COOLDOWN      = 45
-MSG_REWARD_MIN    = 1
-MSG_REWARD_MAX    = 8
-MSG_BONUS_LENGTH  = 80
-MSG_BONUS_AMOUNT  = 3
-VOICE_INTERVAL    = 5
-VOICE_BASE        = 10
+MSG_COOLDOWN = 45
+MSG_REWARD_MIN = 1
+MSG_REWARD_MAX = 8
+MSG_BONUS_LENGTH = 80
+MSG_BONUS_AMOUNT = 3
+VOICE_INTERVAL = 5
+VOICE_BASE = 10
 VOICE_MULTI_BONUS = 2
-VOICE_ALONE_MULT  = 0.3
+VOICE_ALONE_MULT = 0.3
 
-ROLE_CREATE_COST  = 1000
-ROLE_EDIT_COST    = 250
+ROLE_CREATE_COST = 1000
+ROLE_EDIT_COST = 250
 
 COLOR_SUCCESS = 0x2ecc71
-COLOR_ERROR   = 0xe74c3c
-COLOR_INFO    = 0x3498db
-COLOR_GOLD    = 0xf1c40f
-COLOR_PURPLE  = 0x9b59b6
-COLOR_ORANGE  = 0xe67e22
+COLOR_ERROR = 0xe74c3c
+COLOR_INFO = 0x3498db
+COLOR_GOLD = 0xf1c40f
+COLOR_PURPLE = 0x9b59b6
+COLOR_ORANGE = 0xe67e22
 
 RARITY_DATA = {
-    ‘common’:    {‘color’: 0x95a5a6, ‘label’: ‘⬜ Обычный’,    ‘emoji’: ‘⬜’},
-    ‘rare’:      {‘color’: 0x3498db, ‘label’: ‘🟦 Редкий’,      ‘emoji’: ‘🟦’},
-    ‘epic’:      {‘color’: 0x9b59b6, ‘label’: ‘🟪 Эпический’,   ‘emoji’: ‘🟪’},
-    ‘legendary’: {‘color’: 0xf1c40f, ‘label’: ‘🟨 Легендарный’, ‘emoji’: ‘🟨’},
+    ‘common’:    {‘color’: 0x95a5a6, ‘label’: ‘Обычный’,    ‘emoji’: “},
+    ‘rare’:      {‘color’: 0x3498db, ‘label’: ‘Редкий’,      ‘emoji’: “},
+    ‘epic’:      {‘color’: 0x9b59b6, ‘label’: ‘Эпический’,   ‘emoji’: “},
+    ‘legendary’: {‘color’: 0xf1c40f, ‘label’: ‘Легендарный’, ‘emoji’: “},
 }
 
 JOBS = {
     ‘cashier’: {
-        ‘name’: ‘💵 Кассир’, ‘desc’: ‘Работа в супермаркете’,
-        ‘min’: 40,  ‘max’: 90,  ‘cooldown’: 3600,
+        ‘name’: ‘Кассир’, ‘desc’: ‘Работа в супермаркете’,
+        ‘min’: 40, ‘max’: 90, ‘cooldown’: 3600,
         ‘xp_reward’: 10, ‘level_up_xp’: 100, ‘max_level’: 5,
         ‘events’: [
             (‘normal’,  80, ‘Спокойная смена’),
-            (‘bonus’,   12, ‘Благодарный покупатель дал чаевые! +30%’),
-            (‘penalty’,  8, ‘Пробил лишний товар, вычли из зарплаты… -20%’),
+            (‘bonus’,   12, ‘Чаевые +30%’),
+            (‘penalty’,  8, ‘Вычет -20%’),
         ]
     },
     ‘programmer’: {
-        ‘name’: ‘👨\u200d💻 Программист’, ‘desc’: ‘Пишешь код за деньги’,
+        ‘name’: ‘Программист’, ‘desc’: ‘Пишешь код за деньги’,
         ‘min’: 100, ‘max’: 250, ‘cooldown’: 5400,
         ‘xp_reward’: 20, ‘level_up_xp’: 150, ‘max_level’: 5,
         ‘events’: [
             (‘normal’,  70, ‘Сдал задачу вовремя’),
-            (‘bonus’,   20, ‘Клиент доволен, выплатил бонус! +40%’),
-            (‘penalty’, 10, ‘Баг в продакшене, штраф… -25%’),
+            (‘bonus’,   20, ‘Бонус от клиента +40%’),
+            (‘penalty’, 10, ‘Баг в проде -25%’),
         ]
     },
     ‘driver’: {
-        ‘name’: ‘🚕 Таксист’, ‘desc’: ‘Возишь пассажиров’,
-        ‘min’: 60,  ‘max’: 140, ‘cooldown’: 3600,
+        ‘name’: ‘Таксист’, ‘desc’: ‘Возишь пассажиров’,
+        ‘min’: 60, ‘max’: 140, ‘cooldown’: 3600,
         ‘xp_reward’: 12, ‘level_up_xp’: 120, ‘max_level’: 5,
         ‘events’: [
             (‘normal’,  75, ‘Обычная поездка’),
-            (‘bonus’,   15, ‘VIP-клиент дал щедрые чаевые! +35%’),
-            (‘penalty’, 10, ‘Штраф за парковку… -15%’),
+            (‘bonus’,   15, ‘VIP чаевые +35%’),
+            (‘penalty’, 10, ‘Штраф -15%’),
         ]
     },
     ‘doctor’: {
-        ‘name’: ‘👨\u200d⚕️ Врач’, ‘desc’: ‘Лечишь пациентов’,
+        ‘name’: ‘Врач’, ‘desc’: ‘Лечишь пациентов’,
         ‘min’: 150, ‘max’: 350, ‘cooldown’: 7200,
         ‘xp_reward’: 30, ‘level_up_xp’: 200, ‘max_level’: 5,
         ‘events’: [
-            (‘normal’,  65, ‘Обычный приём’),
-            (‘bonus’,   25, ‘Благодарный пациент принёс подарок! +50%’),
-            (‘penalty’, 10, ‘Перерасход медикаментов… -20%’),
+            (‘normal’,  65, ‘Обычный прием’),
+            (‘bonus’,   25, ‘Подарок от пациента +50%’),
+            (‘penalty’, 10, ‘Перерасход -20%’),
         ]
     },
     ‘miner’: {
-        ‘name’: ‘⛏️ Шахтёр’, ‘desc’: ‘Добываешь ресурсы’,
-        ‘min’: 70,  ‘max’: 180, ‘cooldown’: 4200,
+        ‘name’: ‘Шахтер’, ‘desc’: ‘Добываешь ресурсы’,
+        ‘min’: 70, ‘max’: 180, ‘cooldown’: 4200,
         ‘xp_reward’: 15, ‘level_up_xp’: 130, ‘max_level’: 5,
         ‘events’: [
             (‘normal’,  70, ‘Обычная смена’),
-            (‘bonus’,   20, ‘Нашёл редкую жилу! +45%’),
-            (‘penalty’, 10, ‘Сломал инструмент… -20%’),
+            (‘bonus’,   20, ‘Редкая жила +45%’),
+            (‘penalty’, 10, ‘Сломал инструмент -20%’),
         ]
     },
     ‘chef’: {
-        ‘name’: ‘👨\u200d🍳 Шеф-повар’, ‘desc’: ‘Готовишь в ресторане’,
-        ‘min’: 80,  ‘max’: 200, ‘cooldown’: 4800,
+        ‘name’: ‘Шеф-повар’, ‘desc’: ‘Готовишь в ресторане’,
+        ‘min’: 80, ‘max’: 200, ‘cooldown’: 4800,
         ‘xp_reward’: 18, ‘level_up_xp’: 140, ‘max_level’: 5,
         ‘events’: [
             (‘normal’,  72, ‘Отличный ужин’),
-            (‘bonus’,   18, ‘Ресторан получил хороший отзыв! +40%’),
-            (‘penalty’, 10, ‘Пережарил блюдо, вычет… -15%’),
+            (‘bonus’,   18, ‘Хороший отзыв +40%’),
+            (‘penalty’, 10, ‘Пережарил -15%’),
         ]
     },
     ‘lawyer’: {
-        ‘name’: ‘⚖️ Юрист’, ‘desc’: ‘Ведёшь дела в суде’,
+        ‘name’: ‘Юрист’, ‘desc’: ‘Ведешь дела в суде’,
         ‘min’: 200, ‘max’: 500, ‘cooldown’: 10800,
         ‘xp_reward’: 40, ‘level_up_xp’: 250, ‘max_level’: 5,
         ‘events’: [
             (‘normal’,  60, ‘Выиграл дело’),
-            (‘bonus’,   28, ‘Крупный клиент, огромный гонорар! +60%’),
-            (‘penalty’, 12, ‘Проиграл дело, репутация пострадала… -30%’),
+            (‘bonus’,   28, ‘Крупный гонорар +60%’),
+            (‘penalty’, 12, ‘Проиграл дело -30%’),
         ]
     },
     ‘streamer’: {
-        ‘name’: ‘🎮 Стример’, ‘desc’: ‘Стримишь в интернете’,
-        ‘min’: 30,  ‘max’: 300, ‘cooldown’: 3600,
+        ‘name’: ‘Стример’, ‘desc’: ‘Стримишь в интернете’,
+        ‘min’: 30, ‘max’: 300, ‘cooldown’: 3600,
         ‘xp_reward’: 10, ‘level_up_xp’: 100, ‘max_level’: 5,
         ‘events’: [
             (‘normal’,  65, ‘Обычный стрим’),
-            (‘bonus’,   25, ‘Донат от зрителя! +70%’),
-            (‘penalty’, 10, ‘Технические проблемы, зрители ушли… -10%’),
+            (‘bonus’,   25, ‘Донат +70%’),
+            (‘penalty’, 10, ‘Технические проблемы -10%’),
         ]
     },
 }
 “”“,
-
-════════════════════════════════════════════════════════════════
 
 “database/schema.sql”: “””
 PRAGMA foreign_keys = ON;
@@ -186,7 +181,7 @@ CREATE TABLE IF NOT EXISTS shop_items (
     price       INTEGER NOT NULL,
     item_type   TEXT    NOT NULL,
     role_id     INTEGER,
-    emoji       TEXT    DEFAULT ‘📦’,
+    emoji       TEXT    DEFAULT “
     stock       INTEGER DEFAULT -1
 );
 
@@ -202,7 +197,7 @@ CREATE TABLE IF NOT EXISTS cases (
     case_id INTEGER PRIMARY KEY AUTOINCREMENT,
     name    TEXT    NOT NULL,
     price   INTEGER NOT NULL,
-    emoji   TEXT    DEFAULT ‘🎁’
+    emoji   TEXT    DEFAULT ”
 );
 
 CREATE TABLE IF NOT EXISTS case_items (
@@ -247,14 +242,14 @@ CREATE TABLE IF NOT EXISTS multipliers (
 );
 
 INSERT OR IGNORE INTO shop_items (name, description, price, item_type, emoji) VALUES
-    (‘Зелье удачи’,  ‘Увеличивает шанс редкостей на 1 час’, 300,  ‘item’, ‘🧪’),
-    (‘VIP-значок’,   ‘Престижный значок в профиле’,          800,  ‘item’, ‘⭐’),
-    (‘Кейс новичка’, ‘Твой первый кейс!’,                    200,  ‘case’, ‘📦’);
+    (‘Зелье удачи’,  ‘Увеличивает шанс редкостей на 1 час’, 300,  ‘item’, “),
+    (‘VIP-значок’,   ‘Престижный значок в профиле’,          800,  ‘item’, “),
+    (‘Кейс новичка’, ‘Твой первый кейс!’,                    200,  ‘case’, “);
 
 INSERT OR IGNORE INTO cases (name, price, emoji) VALUES
-    (‘Новичок’,  200, ‘📦’),
-    (‘Премиум’,  500, ‘💎’),
-    (‘Легенда’, 1500, ‘👑’);
+    (‘Новичок’,  200, “),
+    (‘Премиум’,  500, “),
+    (‘Легенда’, 1500, “);
 
 INSERT OR IGNORE INTO case_items (case_id, item_name, rarity, reward_type, reward_value, weight) VALUES
     (1, ‘50 монет’,    ‘common’,    ‘coins’, ‘50’,    60),
@@ -271,8 +266,6 @@ INSERT OR IGNORE INTO case_items (case_id, item_name, rarity, reward_type, rewar
     (3, ‘25000 монет’, ‘legendary’, ‘coins’, ‘25000’,  5);
 “”“,
 
-════════════════════════════════════════════════════════════════
-
 “database/db.py”: “””
 import aiosqlite
 import config
@@ -283,7 +276,7 @@ async def init_db():
             await db.executescript(f.read())
         await db.commit()
 
-async def get_user(user_id: int) -> dict:
+async def get_user(user_id):
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(‘SELECT * FROM users WHERE user_id=?’, (user_id,)) as cur:
@@ -299,17 +292,17 @@ async def get_user(user_id: int) -> dict:
                     ‘bank’: 0, ‘last_work’: 0, ‘last_daily’: 0, ‘last_weekly’: 0}
         return dict(row)
 
-async def get_balance(user_id: int) -> tuple:
+async def get_balance(user_id):
     user = await get_user(user_id)
     return user[‘balance’], user[‘bank’]
 
-async def update_balance(user_id: int, amount: int):
+async def update_balance(user_id, amount):
     await get_user(user_id)
     async with aiosqlite.connect(config.DB_PATH) as db:
         await db.execute(‘UPDATE users SET balance=balance+? WHERE user_id=?’, (amount, user_id))
         await db.commit()
 
-async def get_multiplier(guild, member) -> float:
+async def get_multiplier(guild, member):
     async with aiosqlite.connect(config.DB_PATH) as db:
         async with db.execute(‘SELECT role_id, multiplier FROM multipliers’) as cur:
             rows = await cur.fetchall()
@@ -320,13 +313,13 @@ async def get_multiplier(guild, member) -> float:
             mult = max(mult, multiplier)
     return mult
 
-async def get_shop_items() -> list:
+async def get_shop_items():
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(‘SELECT * FROM shop_items’) as cur:
             return [dict® for r in await cur.fetchall()]
 
-async def add_to_inventory(user_id: int, item_id: int):
+async def add_to_inventory(user_id, item_id):
     async with aiosqlite.connect(config.DB_PATH) as db:
         async with db.execute(
             ‘SELECT id FROM inventory WHERE user_id=? AND item_id=?’, (user_id, item_id)
@@ -338,28 +331,29 @@ async def add_to_inventory(user_id: int, item_id: int):
             await db.execute(‘INSERT INTO inventory (user_id,item_id) VALUES (?,?)’, (user_id, item_id))
         await db.commit()
 
-async def get_inventory(user_id: int) -> list:
+async def get_inventory(user_id):
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            ‘SELECT s.name,s.emoji,s.description,i.quantity FROM inventory i ’
-            ‘JOIN shop_items s ON s.item_id=i.item_id WHERE i.user_id=?’, (user_id,)
+            ‘SELECT s.name,s.emoji,s.description,i.quantity ’
+            ‘FROM inventory i JOIN shop_items s ON s.item_id=i.item_id WHERE i.user_id=?’,
+            (user_id,)
         ) as cur:
             return [dict® for r in await cur.fetchall()]
 
-async def get_cases() -> list:
+async def get_cases():
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(‘SELECT * FROM cases’) as cur:
             return [dict® for r in await cur.fetchall()]
 
-async def get_case_items(case_id: int) -> list:
+async def get_case_items(case_id):
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(‘SELECT * FROM case_items WHERE case_id=?’, (case_id,)) as cur:
             return [dict® for r in await cur.fetchall()]
 
-async def get_activity(user_id: int) -> dict:
+async def get_activity(user_id):
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(‘SELECT * FROM activity WHERE user_id=?’, (user_id,)) as cur:
@@ -369,7 +363,7 @@ async def get_activity(user_id: int) -> dict:
                 ‘streak_days’: 0, ‘total_earned’: 0}
     return dict(row)
 
-async def add_earned(user_id: int, amount: int):
+async def add_earned(user_id, amount):
     async with aiosqlite.connect(config.DB_PATH) as db:
         await db.execute(‘UPDATE users SET balance=balance+? WHERE user_id=?’, (amount, user_id))
         await db.execute(
@@ -379,14 +373,14 @@ async def add_earned(user_id: int, amount: int):
         )
         await db.commit()
 
-async def get_user_job(user_id: int):
+async def get_user_job(user_id):
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(‘SELECT * FROM user_jobs WHERE user_id=?’, (user_id,)) as cur:
             row = await cur.fetchone()
     return dict(row) if row else None
 
-async def save_job_history(user_id: int, job_id: str, earned: int, event: str):
+async def save_job_history(user_id, job_id, earned, event):
     async with aiosqlite.connect(config.DB_PATH) as db:
         await db.execute(
             ‘INSERT INTO job_history (user_id,job_id,earned,event) VALUES (?,?,?,?)’,
@@ -399,7 +393,7 @@ async def save_job_history(user_id: int, job_id: str, earned: int, event: str):
         )
         await db.commit()
 
-async def get_leaderboard(limit: int = 10) -> list:
+async def get_leaderboard(limit=10):
     async with aiosqlite.connect(config.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -409,9 +403,44 @@ async def get_leaderboard(limit: int = 10) -> list:
             return [dict® for r in await cur.fetchall()]
 “”“,
 
-════════════════════════════════════════════════════════════════
+“utils/init.py”: “”,
+“database/init.py”: “”,
+“cogs/init.py”: “”,
 
 “utils/animations.py”: “””
+import asyncio
+import random
+import discord
+
+async def loading_bar(message, title, color, steps=6):
+    for i in range(1, steps + 1):
+        filled = int((i / steps) * 10)
+        bar = ‘X’ * filled + ‘.’ * (10 - filled)
+        pct = int((i / steps) * 100)
+        embed = discord.Embed(title=title, description=f’[{bar}] {pct}%‘, color=color)
+        await message.edit(embed=embed)
+        await asyncio.sleep(0.45)
+
+async def countdown(message, title, color, seconds=3):
+    emojis = [‘3’, ‘2’, ‘1’, ‘GO!’][:seconds + 1]
+    for emoji in emojis:
+        embed = discord.Embed(title=title, description=f’# {emoji}‘, color=color)
+        await message.edit(embed=embed)
+        await asyncio.sleep(0.85)
+
+async def slot_roll(message, final_symbols, rounds=14):
+    pool = [‘A’, ‘B’, ‘C’, ’D’, ‘E’, ‘F’, ‘G’, ‘H’]
+    for i in range(rounds):
+        cols = []
+        for j, sym in enumerate(final_symbols):
+            if i >= rounds - j - 1:
+                cols.append(sym)
+            else:
+                cols.append(random.choice(pool))
+        delay = 0.07 + i * 0.016
+        embed = discord.Embed(
+            title=‘SLOTS’,
+            description=’
 import asyncio, random
 import discord
 
