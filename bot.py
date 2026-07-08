@@ -6,10 +6,10 @@ Discord Economy Bot
 - БД: встроенный sqlite3 (не нужен aiosqlite)
 
 Установка:
-    pip install discord.py python-dotenv
+    pip install discord.py
 
-.env:
-    DISCORD_TOKEN=ВАШ_ТОКЕН
+Задайте переменную окружения DISCORD_TOKEN перед запуском, например:
+    export DISCORD_TOKEN="ВАШ_ТОКЕН"
 
 Запуск:
     python bot.py
@@ -23,11 +23,10 @@ import asyncio
 from datetime import datetime, timedelta
 from typing import Optional
 
-from dotenv import load_dotenv
+# dotenv removed — используйте переменную окружения DISCORD_TOKEN
+
 import discord
 from discord.ext import commands
-
-load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 PREFIX = "!"
@@ -838,7 +837,7 @@ async def on_command_error(ctx, error):
 
 def main():
     if not TOKEN:
-        logger.error("DISCORD_TOKEN не найден! Создайте .env с DISCORD_TOKEN=ВАШ_ТОКЕН")
+        logger.error("DISCORD_TOKEN не найден! Установите переменную окружения DISCORD_TOKEN и перезапустите.")
         return
     bot.run(TOKEN)
 
