@@ -24,6 +24,7 @@ VOICE_MIN_SECONDS = 60            # минимальное оплачиваем�
 VOICE_DAILY_LIMIT = 300           # лимит монет в день за голосовую
 VOICE_IGNORE_AFK = True           # не платить в AFK каналах
 VOICE_AFK_CATEGORY_NAMES = ['AFK', 'afk']  # дополнительные названия категорий для исключения
+WORK_COOLDOWN_SECONDS = 15 * 60  # 15 минут
 
 intents = discord.Intents.default()
 intents.members = True
@@ -58,6 +59,37 @@ c.execute('''CREATE TABLE IF NOT EXISTS mines(
 conn.commit()
 
 db_lock = asyncio.Lock()
+
+# in-memory cooldown storage for work (survives only until bot restart)
+work_cooldowns = {}
+
+# ----------------- UTIL -----------------
+async def send_reply(ctx, content: str = None, embed: discord.Embed = None):
+    """
+    Отправляет сообщение и автоматически тегает автора команды (ctx.author.mention).
+    Если передан embed — подпись с упоминанием добавляется в footer, иначе упоминание добавляется в начало текста.
+    """
+    try:
+        if embed:
+            footer = embed.footer.text or ''
+            mention = f'Запросил: {ctx.author.mention}'
+            if footer:
+                embed.set_footer(text=f"{footer} • {mention}")
+            else:
+                embed.set_footer(text=mention)
+            return await ctx.send(embed=embed)
+        else:
+            return await ctx.send(f'{ctx.author.mention} {content}')
+    except Exception:
+        if embed:
+            return await ctx.send(embed=embed)
+        return await ctx.send(content)
+
+def safe_member_avatar(member):
+    try:
+        return member.display_avatar.url
+    except Exception:
+        return None
 
 # ----------------- DB HELPERS -----------------
 async def ensure_user(uid: int):
@@ -138,12 +170,10 @@ async def on_voice_state_update(member, before, after):
         if member.bot:
             return
         uid = member.id
-        # joined
         if before.channel is None and after.channel is not None:
             if VOICE_IGNORE_AFK and is_afk_channel(after.channel):
                 return
             voice_sessions[uid] = (after.channel.id, time.time())
-        # moved
         elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id:
             if uid in voice_sessions:
                 _, ts = voice_sessions.pop(uid)
@@ -152,7 +182,6 @@ async def on_voice_state_update(member, before, after):
             if VOICE_IGNORE_AFK and is_afk_channel(after.channel):
                 return
             voice_sessions[uid] = (after.channel.id, time.time())
-        # left
         elif before.channel is not None and after.channel is None:
             if uid in voice_sessions:
                 _, ts = voice_sessions.pop(uid)
@@ -224,8 +253,8 @@ async def help_cmd(ctx, command: str = None):
         for k, v in sections.items():
             embed.add_field(name=k, value=v, inline=False)
         embed.set_footer(text='Напишите: !help <команда> для подробной информации')
-        return await ctx.send(embed=embed)
-    await ctx.send('Подробная помощь временно отключена — используйте `!help`')
+        return await send_reply(ctx, embed=embed)
+    return await send_reply(ctx, content='Подробная помощь временно отключена — используйте `!help`')
 
 # ----------------- ECONOMY -----------------
 @bot.command(aliases=['bal','баланс'])
@@ -233,10 +262,11 @@ async def balance(ctx, member: discord.Member = None):
     member = member or ctx.author
     bal = await get_balance(member.id)
     embed = discord.Embed(title='Баланс', color=0xFAA61A)
-    embed.set_thumbnail(url=member.display_avatar.url if member else '')
+    avatar = safe_member_avatar(member)
+    if avatar:
+        embed.set_thumbnail(url=avatar)
     embed.add_field(name=member.display_name, value=f'{bal} {CURRENCY}', inline=True)
-    embed.set_footer(text=f'Запросил: {ctx.author.display_name}')
-    await ctx.send(embed=embed)
+    return await send_reply(ctx, embed=embed)
 
 @bot.command()
 async def daily(ctx):
@@ -250,40 +280,60 @@ async def daily(ctx):
                 rem = datetime.timedelta(hours=24) - (now - last_dt)
                 hours = rem.seconds // 3600
                 mins = (rem.seconds % 3600) // 60
-                return await ctx.send(f'Ежедневная уже взята. Подождите {hours}ч {mins}м')
+                return await send_reply(ctx, content=f'Ежедневная уже взята. Подождите {hours}ч {mins}м')
         except Exception:
             pass
     await change_balance(uid, DAILY_AMOUNT)
     await set_last_daily(uid, now.isoformat())
-    embed = discord.Embed(title='Daily получен!', description=f'Вы получили {DAILY_AMOUNT} {CURRENCY}', color=0x2ECC71)
-    embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    bal = await get_balance(uid)
+    embed = discord.Embed(title='Daily получен!', description=f'Вы получили {DAILY_AMOUNT} {CURRENCY}\nТекущий баланс: {bal} {CURRENCY}', color=0x2ECC71)
+    avatar = safe_member_avatar(ctx.author)
+    if avatar:
+        embed.set_thumbnail(url=avatar)
     embed.set_footer(text='Заходите снова через 24 часа')
-    await ctx.send(embed=embed)
+    return await send_reply(ctx, embed=embed)
 
 @bot.command()
 async def work(ctx):
+    now_ts = time.time()
+    uid = ctx.author.id
+    last = work_cooldowns.get(uid)
+    if last and now_ts - last < WORK_COOLDOWN_SECONDS:
+        rem = int(WORK_COOLDOWN_SECONDS - (now_ts - last))
+        mins = rem // 60
+        secs = rem % 60
+        return await send_reply(ctx, content=f'Команда `work` доступна раз в 15 минут. Подождите {mins}м {secs}с')
     amount = random.randint(WORK_MIN, WORK_MAX)
-    await change_balance(ctx.author.id, amount)
+    await change_balance(uid, amount)
+    work_cooldowns[uid] = now_ts
+    bal = await get_balance(uid)
     embed = discord.Embed(title='Работа завершена', color=0xF39C12)
     embed.add_field(name='Заработано', value=f'{amount} {CURRENCY}')
-    embed.set_thumbnail(url=ctx.author.display_avatar.url)
-    await ctx.send(embed=embed)
+    embed.add_field(name='Текущий баланс', value=f'{bal} {CURRENCY}')
+    avatar = safe_member_avatar(ctx.author)
+    if avatar:
+        embed.set_thumbnail(url=avatar)
+    return await send_reply(ctx, embed=embed)
 
 @bot.command()
 async def give(ctx, member: discord.Member, amount: int):
     if amount <= 0:
-        return await ctx.send('Сумма должна быть положительной.')
+        return await send_reply(ctx, content='Сумма должна быть положительной.')
     bal = await get_balance(ctx.author.id)
     if bal < amount:
-        return await ctx.send('Недостаточно средств.')
+        return await send_reply(ctx, content='Недостаточно средств.')
     await change_balance(ctx.author.id, -amount)
     await change_balance(member.id, amount)
+    new_bal = await get_balance(ctx.author.id)
     embed = discord.Embed(title='Трансфер выполнен', color=0x57F287)
-    embed.set_thumbnail(url=member.display_avatar.url)
+    avatar = safe_member_avatar(member)
+    if avatar:
+        embed.set_thumbnail(url=avatar)
     embed.add_field(name='От', value=f'{ctx.author.display_name}', inline=True)
     embed.add_field(name='Кому', value=f'{member.display_name}', inline=True)
     embed.add_field(name='Сумма', value=f'{amount} {CURRENCY}', inline=False)
-    await ctx.send(embed=embed)
+    embed.add_field(name='Ваш текущий баланс', value=f'{new_bal} {CURRENCY}', inline=False)
+    return await send_reply(ctx, embed=embed)
 
 @bot.command()
 async def top(ctx, limit: int = 10):
@@ -294,17 +344,15 @@ async def top(ctx, limit: int = 10):
     embed = discord.Embed(title=f'TOP {limit} по балансу', color=0xFFD700)
     if not rows:
         embed.description = 'Пока нет пользователей в базе.'
-        return await ctx.send(embed=embed)
+        return await send_reply(ctx, embed=embed)
     for i, (uid, bal) in enumerate(rows, start=1):
         member = ctx.guild.get_member(uid)
         name = member.display_name if member else str(uid)
-        avatar = getattr(member, 'display_avatar', None)
-        avatar_url = avatar.url if avatar else None
+        avatar = safe_member_avatar(member) if member else None
         embed.add_field(name=f'{i}. {name}', value=f'`{bal} {CURRENCY}`', inline=False)
-        if i == 1 and avatar_url:
-            embed.set_thumbnail(url=avatar_url)
-    embed.set_footer(text='Ники показываются как display_name на сервере')
-    await ctx.send(embed=embed)
+        if i == 1 and avatar:
+            embed.set_thumbnail(url=avatar)
+    return await send_reply(ctx, embed=embed)
 
 # ----------------- SHOP -----------------
 @bot.command()
@@ -316,103 +364,117 @@ async def shop(ctx, action: str = None, role: discord.Role = None, price: int = 
         embed = discord.Embed(title='Магазин ролей', color=0x7289DA)
         if not rows:
             embed.description = 'Магазин пуст.'
-            return await ctx.send(embed=embed)
+            return await send_reply(ctx, embed=embed)
         for rid, p in rows:
             r = ctx.guild.get_role(rid)
             name = r.name if r else f'Роль ({rid}) — удалена'
             embed.add_field(name=name, value=f'{p} {CURRENCY}', inline=False)
         embed.set_footer(text=f'Купить: {PREFIX}shop buy @Role')
-        return await ctx.send(embed=embed)
+        return await send_reply(ctx, embed=embed)
 
     if action == 'add':
         if not ctx.author.guild_permissions.manage_roles:
-            return await ctx.send('Нужны права manage_roles')
+            return await send_reply(ctx, content='Нужны права manage_roles')
         if not role or price is None:
-            return await ctx.send('Использование: shop add @Role 500')
+            return await send_reply(ctx, content='Использование: shop add @Role 500')
         async with db_lock:
             c.execute('INSERT OR REPLACE INTO shop(role_id,price) VALUES(?,?)', (role.id, price))
             conn.commit()
-        return await ctx.send(embed=discord.Embed(description=f'Роль **{role.name}** добавлена за **{price} {CURRENCY}**', color=0x2ECC71))
+        embed = discord.Embed(description=f'Роль **{role.name}** добавлена за **{price} {CURRENCY}**', color=0x2ECC71)
+        return await send_reply(ctx, embed=embed)
 
     if action == 'buy':
         if not role:
-            return await ctx.send('Укажите роль: shop buy @Role')
+            return await send_reply(ctx, content='Укажите роль: shop buy @Role')
         async with db_lock:
             c.execute('SELECT price FROM shop WHERE role_id=?', (role.id,))
             r = c.fetchone()
         if not r:
-            return await ctx.send('Эта роль не продаётся.')
+            return await send_reply(ctx, content='Эта роль не продаётся.')
         price = r[0]
         bal = await get_balance(ctx.author.id)
         if bal < price:
-            return await ctx.send('Недостаточно средств.')
+            return await send_reply(ctx, content='Недостаточно средств.')
         await change_balance(ctx.author.id, -price)
         try:
             await ctx.author.add_roles(role)
         except Exception as e:
             await change_balance(ctx.author.id, price)
-            return await ctx.send('Не удалось выдать роль: ' + str(e))
-        return await ctx.send(embed=discord.Embed(description=f'{ctx.author.mention} купил роль **{role.name}** за **{price} {CURRENCY}**', color=0x57F287))
+            return await send_reply(ctx, content='Не удалось выдать роль: ' + str(e))
+        new_bal = await get_balance(ctx.author.id)
+        embed = discord.Embed(description=f'{ctx.author.mention} купил роль **{role.name}** за **{price} {CURRENCY}**', color=0x57F287)
+        embed.add_field(name='Текущий баланс', value=f'{new_bal} {CURRENCY}', inline=False)
+        return await send_reply(ctx, embed=embed)
 
     if action == 'remove':
         if not ctx.author.guild_permissions.manage_roles:
-            return await ctx.send('Нужны права manage_roles')
+            return await send_reply(ctx, content='Нужны права manage_roles')
         if not role:
-            return await ctx.send('Укажите роль: shop remove @Role')
+            return await send_reply(ctx, content='Укажите роль: shop remove @Role')
         async with db_lock:
             c.execute('DELETE FROM shop WHERE role_id=?', (role.id,))
             conn.commit()
-        return await ctx.send(embed=discord.Embed(description=f'Роль **{role.name}** удалена из магазина', color=0xE74C3C))
+        embed = discord.Embed(description=f'Роль **{role.name}** удалена из магазина', color=0xE74C3C)
+        return await send_reply(ctx, embed=embed)
 
-    await ctx.send('Неверное действие. Доступные: (без аргументов) показать, add, remove, buy')
+    return await send_reply(ctx, content='Неверное действие. Доступные: (без аргументов) показать, add, remove, buy')
 
 # ----------------- GAMES -----------------
 @bot.command(aliases=['монета'])
 async def coin(ctx, guess: str = None, bet: int = 0):
     guess = (guess or '').lower()
     if guess and guess not in ('орёл','решка','heads','tails'):
-        return await ctx.send('Угадайте `орёл` или `решка`. Пример: `!coin орёл 50`')
+        return await send_reply(ctx, content='Угадайте `орёл` или `решка`. Пример: `!coin орёл 50`')
     if guess == 'орёл': guess = 'heads'
     if guess == 'решка': guess = 'tails'
     bet = max(0, bet)
-    bal = await get_balance(ctx.author.id)
-    if bet and bal < bet:
-        return await ctx.send('Недостаточно средств для ставки')
+    bal_before = await get_balance(ctx.author.id)
+    if bet and bal_before < bet:
+        return await send_reply(ctx, content='Недостаточно средств для ставки')
     result = random.choice(['heads','tails'])
     res_text = 'орёл' if result=='heads' else 'решка'
     if bet:
         if guess and result == guess:
             await change_balance(ctx.author.id, bet)
-            return await ctx.send(embed=discord.Embed(description=f'Выпало **{res_text}** — вы выиграли **{bet} {CURRENCY}**', color=0x2ECC71))
+            bal = await get_balance(ctx.author.id)
+            embed = discord.Embed(description=f'Выпало **{res_text}** — вы выиграли **{bet} {CURRENCY}**\nТекущий баланс: {bal} {CURRENCY}', color=0x2ECC71)
+            return await send_reply(ctx, embed=embed)
         else:
             await change_balance(ctx.author.id, -bet)
-            return await ctx.send(embed=discord.Embed(description=f'Выпало **{res_text}** — вы проиграли **{bet} {CURRENCY}**', color=0xE74C3C))
-    await ctx.send(embed=discord.Embed(description=f'Выпало **{res_text}**').set_footer(text='Используйте ставку: !coin орёл 50'))
+            bal = await get_balance(ctx.author.id)
+            embed = discord.Embed(description=f'Выпало **{res_text}** — вы проиграли **{bet} {CURRENCY}**\nТекущий баланс: {bal} {CURRENCY}', color=0xE74C3C)
+            return await send_reply(ctx, embed=embed)
+    bal = await get_balance(ctx.author.id)
+    embed = discord.Embed(description=f'Выпало **{res_text}**\nТекущий баланс: {bal} {CURRENCY}').set_footer(text='Используйте ставку: !coin орёл 50')
+    return await send_reply(ctx, embed=embed)
 
 @bot.command(aliases=['кубик'])
 async def dice(ctx, sides: int = 6, bet: int = 0):
     sides = max(2, min(100, sides))
     bet = max(0, bet)
-    bal = await get_balance(ctx.author.id)
-    if bet and bal < bet:
-        return await ctx.send('Недостаточно средств для ставки')
+    bal_before = await get_balance(ctx.author.id)
+    if bet and bal_before < bet:
+        return await send_reply(ctx, content='Недостаточно средств для ставки')
     result = random.randint(1, sides)
     if bet:
         if result == sides:
             win = bet * (sides//2)
             await change_balance(ctx.author.id, win)
-            return await ctx.send(embed=discord.Embed(description=f'Выпало **{result}** — джекпот! Вы получили **{win} {CURRENCY}**', color=0x2ECC71))
+            bal = await get_balance(ctx.author.id)
+            return await send_reply(ctx, embed=discord.Embed(description=f'Выпало **{result}** — джекпот! Вы получили **{win} {CURRENCY}**\nТекущий баланс: {bal} {CURRENCY}', color=0x2ECC71))
         else:
             await change_balance(ctx.author.id, -bet)
-            return await ctx.send(embed=discord.Embed(description=f'Выпало **{result}** — вы проиграли **{bet} {CURRENCY}**', color=0xE74C3C))
-    await ctx.send(embed=discord.Embed(description=f'Выпало **{result}**'))
+            bal = await get_balance(ctx.author.id)
+            return await send_reply(ctx, embed=discord.Embed(description=f'Выпало **{result}** — вы проиграли **{bet} {CURRENCY}**\nТекущий баланс: {bal} {CURRENCY}', color=0xE74C3C))
+    bal = await get_balance(ctx.author.id)
+    return await send_reply(ctx, embed=discord.Embed(description=f'Выпало **{result}**\nТекущий баланс: {bal} {CURRENCY}'))
 
 @bot.command(aliases=['слоты'])
 async def slots(ctx, bet: int = 0):
     bet = max(0, bet)
-    bal = await get_balance(ctx.author.id)
-    if bet and bal < bet:
-        return await ctx.send('Недостаточно средств для ставки')
+    bal_before = await get_balance(ctx.author.id)
+    if bet and bal_before < bet:
+        return await send_reply(ctx, content='Недостаточно средств для ставки')
     symbols = ['🍒','🍋','🍊','🔔','💎']
     r = [random.choice(symbols) for _ in range(3)]
     line = ' | '.join(r)
@@ -420,11 +482,14 @@ async def slots(ctx, bet: int = 0):
         if r[0]==r[1]==r[2]:
             win = bet * 5
             await change_balance(ctx.author.id, win)
-            return await ctx.send(embed=discord.Embed(description=f'{line} — Вы выиграли **{win} {CURRENCY}**!', color=0x2ECC71))
+            bal = await get_balance(ctx.author.id)
+            return await send_reply(ctx, embed=discord.Embed(description=f'{line} — Вы выиграли **{win} {CURRENCY}**!\nТекущий баланс: {bal} {CURRENCY}', color=0x2ECC71))
         else:
             await change_balance(ctx.author.id, -bet)
-            return await ctx.send(embed=discord.Embed(description=f'{line} — Вы проиграли **{bet} {CURRENCY}**', color=0xE74C3C))
-    await ctx.send(embed=discord.Embed(description=line))
+            bal = await get_balance(ctx.author.id)
+            return await send_reply(ctx, embed=discord.Embed(description=f'{line} — Вы проиграли **{bet} {CURRENCY}**\nТекущий баланс: {bal} {CURRENCY}', color=0xE74C3C))
+    bal = await get_balance(ctx.author.id)
+    return await send_reply(ctx, embed=discord.Embed(description=f'{line}\nТекущий баланс: {bal} {CURRENCY}'))
 
 @bot.command(name='rps', aliases=['камень'])
 async def rps_cmd(ctx, choice: str = None, bet: int = 0):
@@ -433,13 +498,12 @@ async def rps_cmd(ctx, choice: str = None, bet: int = 0):
     if choice in mapping:
         choice = mapping[choice]
     if choice not in ('rock','paper','scissors'):
-        return await ctx.send('Выберите: `камень`, `ножницы` или `бумага`. Пример: `!rps камень 50`')
+        return await send_reply(ctx, content='Выберите: `камень`, `ножницы` или `бумага`. Пример: `!rps камень 50`')
     bet = max(0, bet)
-    bal = await get_balance(ctx.author.id)
-    if bet and bal < bet:
-        return await ctx.send('Недостаточно средств для ставки')
+    bal_before = await get_balance(ctx.author.id)
+    if bet and bal_before < bet:
+        return await send_reply(ctx, content='Недостаточно средств для ставки')
     bot_choice = random.choice(['rock','paper','scissors'])
-    # animation (simple)
     try:
         anim = await ctx.send(' '.join(RPS_FRAMES))
         for _ in range(5):
@@ -451,7 +515,8 @@ async def rps_cmd(ctx, choice: str = None, bet: int = 0):
                 pass
     except Exception:
         pass
-    await ctx.send(f'Вы: **{choice}**\nБот: **{bot_choice}**')
+    outcome_text = f'Вы: **{choice}**\nБот: **{bot_choice}**'
+    await send_reply(ctx, content=outcome_text)
     if choice == bot_choice:
         outcome = 'tie'
     elif (choice=='rock' and bot_choice=='scissors') or (choice=='scissors' and bot_choice=='paper') or (choice=='paper' and bot_choice=='rock'):
@@ -461,34 +526,44 @@ async def rps_cmd(ctx, choice: str = None, bet: int = 0):
     if bet:
         if outcome=='win':
             await change_balance(ctx.author.id, bet)
-            return await ctx.send(embed=discord.Embed(description=f'Вы выиграли **{bet} {CURRENCY}**', color=0x2ECC71))
+            bal = await get_balance(ctx.author.id)
+            return await send_reply(ctx, embed=discord.Embed(description=f'Вы выиграли **{bet} {CURRENCY}**\nТекущий баланс: {bal} {CURRENCY}', color=0x2ECC71))
         if outcome=='lose':
             await change_balance(ctx.author.id, -bet)
-            return await ctx.send(embed=discord.Embed(description=f'Вы проиграли **{bet} {CURRENCY}**', color=0xE74C3C))
-        return await ctx.send('Ничья — ставка возвращена.')
+            bal = await get_balance(ctx.author.id)
+            return await send_reply(ctx, embed=discord.Embed(description=f'Вы проиграли **{bet} {CURRENCY}**\nТекущий баланс: {bal} {CURRENCY}', color=0xE74C3C))
+        bal = await get_balance(ctx.author.id)
+        return await send_reply(ctx, content=f'Ничья — ставка возвращена. Текущий баланс: {bal} {CURRENCY}')
     else:
         texts = {'win':'Вы победили!','lose':'Вы проиграли.','tie':'Ничья.'}
-        return await ctx.send(embed=discord.Embed(description=texts[outcome], color=0x5865F2))
+        bal = await get_balance(ctx.author.id)
+        return await send_reply(ctx, embed=discord.Embed(description=f"{texts[outcome]}\nТекущий баланс: {bal} {CURRENCY}", color=0x5865F2))
 
 @bot.command()
 async def race(ctx, *members: discord.Member):
     if not members:
-        return await ctx.send('Укажите хотя бы одного участника (упомяните). Пример: `!race @user1 @user2`')
+        return await send_reply(ctx, content='Укажите хотя бы одного участника (упомяните). Пример: `!race @user1 @user2`')
     participants = [ctx.author] + list(dict.fromkeys(members))
     participants = participants[:6]
     positions = {p: 0 for p in participants}
-    msg = await ctx.send('Старт гонки: ' + ' '.join(p.mention for p in participants))
+    msg = await send_reply(ctx, content='Старт гонки: ' + ' '.join(p.mention for p in participants))
+    if isinstance(msg, discord.Message):
+        edit_target = msg
+    else:
+        channel = ctx.channel
+        edit_target = await channel.fetch_message(channel.last_message_id)
     for _ in range(12):
         for p in participants:
             positions[p] += random.randint(0,2)
         line = '\n'.join(f'{p.display_name}: ' + '>'*positions[p] for p in participants)
         try:
-            await msg.edit(content=line)
+            await edit_target.edit(content=line)
         except Exception:
-            await msg.channel.send(line)
+            await ctx.send(line)
         await asyncio.sleep(0.6)
     winner = max(positions, key=positions.get)
-    await ctx.send(f'Победитель — {winner.mention}!')
+    bal = await get_balance(ctx.author.id)
+    return await send_reply(ctx, content=f'Победитель — {winner.mention}!\nТекущий баланс: {bal} {CURRENCY}')
 
 # ----------------- BLACKJACK -----------------
 BLACKJACK_TIMEOUT = 60
@@ -525,9 +600,9 @@ class BJGame:
 @bot.command(aliases=['блекджек'])
 async def blackjack(ctx, bet: int = 0):
     bet = max(0, bet)
-    bal = await get_balance(ctx.author.id)
-    if bet and bal < bet:
-        return await ctx.send('Недостаточно средств для ставки')
+    bal_before = await get_balance(ctx.author.id)
+    if bet and bal_before < bet:
+        return await send_reply(ctx, content='Недостаточно средств для ставки')
     game = BJGame(ctx, bet)
     if bet:
         await change_balance(ctx.author.id, -bet)
@@ -537,16 +612,20 @@ async def blackjack(ctx, bet: int = 0):
     except Exception:
         if bet:
             await change_balance(ctx.author.id, bet)
-        return await ctx.send('Не удалось отправить личное сообщение. Включите приём личных сообщений от участников сервера.')
+        return await send_reply(ctx, content='Не удалось отправить личное сообщение. Включите приём личных сообщений от участников сервера.')
 
     if game.is_blackjack(game.player) and game.is_blackjack(game.dealer):
         if bet:
             await change_balance(ctx.author.id, bet)
-        return await dm.send(game.player_text() + '\n' + game.dealer_text(reveal=True) + '\nНичья (оба Blackjack).')
+        await dm.send(game.player_text() + '\n' + game.dealer_text(reveal=True) + '\nНичья (оба Blackjack).')
+        bal = await get_balance(ctx.author.id)
+        return await send_reply(ctx, content=f'Результаты блекджека отправлены в личные сообщения. Текущий баланс: {bal} {CURRENCY}')
     if game.is_blackjack(game.player):
         if bet:
             await change_balance(ctx.author.id, int(bet * 1.5))
-        return await dm.send(game.player_text() + '\n' + game.dealer_text(reveal=True) + '\nBlackjack! Вы выиграли.')
+        await dm.send(game.player_text() + '\n' + game.dealer_text(reveal=True) + '\nBlackjack! Вы выиграли.')
+        bal = await get_balance(ctx.author.id)
+        return await send_reply(ctx, content=f'Результаты блекджека отправлены в личные сообщения. Текущий баланс: {bal} {CURRENCY}')
 
     # player turn
     while True:
@@ -558,12 +637,16 @@ async def blackjack(ctx, bet: int = 0):
         except asyncio.TimeoutError:
             if bet:
                 await change_balance(ctx.author.id, bet)
-            return await dm.send('Время вышло — игра отменена, ставка возвращена.')
+            await dm.send('Время вышло — игра отменена, ставка возвращена.')
+            bal = await get_balance(ctx.author.id)
+            return await send_reply(ctx, content=f'Игра блекджек отменена — ставка возвращена. Текущий баланс: {bal} {CURRENCY}')
         cmd = resp.content.lower()
         if cmd in ('взять','хит'):
             game.player.append(game.deck.pop())
             if game.total(game.player) > 21:
-                return await dm.send(game.player_text() + '\nПеребор! Вы проиграли.')
+                await dm.send(game.player_text() + '\nПеребор! Вы проиграли.')
+                bal = await get_balance(ctx.author.id)
+                return await send_reply(ctx, content=f'Результаты блекджека отправлены в личные сообщения. Текущий баланс: {bal} {CURRENCY}')
             continue
         break
 
@@ -585,7 +668,8 @@ async def blackjack(ctx, bet: int = 0):
     else:
         res = 'Вы проиграли.'
     await dm.send(game.player_text() + '\n' + game.dealer_text(reveal=True) + '\n' + res)
-    await ctx.send(f'{ctx.author.mention}, результаты блекджека отправлены в личные сообщения.')
+    bal = await get_balance(ctx.author.id)
+    return await send_reply(ctx, content=f'Результаты блекджека отправлены в личные сообщения. Текущий баланс: {bal} {CURRENCY}')
 
 # ----------------- MINESWEEPER -----------------
 @bot.command(aliases=['сапёр','минесвипер'])
@@ -620,16 +704,17 @@ async def minesweeper(ctx, rows: int = 6, cols: int = 6, bombs: int = 8):
         line = f'{r:2d} ' + ' '.join('▢ ' for _ in range(cols))
         lines.append(line)
     lines.append('\nОткрыть: `!ms_open row col` — пример: `!ms_open 2 3`')
-    await ctx.send('\n'.join(lines))
+    bal = await get_balance(ctx.author.id)
+    return await send_reply(ctx, content='\n'.join(lines) + f"\nТекущий баланс: {bal} {CURRENCY}")
 
 @bot.command()
 async def ms_open(ctx, row: int, col: int):
     data = await load_mine(ctx.author.id)
     if not data:
-        return await ctx.send('У вас нет сохранённого поля. Создайте с помощью `!minesweeper`')
+        return await send_reply(ctx, content='У вас нет сохранённого поля. Создайте с помощью `!minesweeper`')
     board, rows, cols = data
     if not (0 <= row < rows and 0 <= col < cols):
-        return await ctx.send('Неверные координаты')
+        return await send_reply(ctx, content='Неверные координаты')
     if board[row][col] == 'B':
         out = ['   ' + ' '.join(f'{i:2d}' for i in range(cols))]
         for r in range(rows):
@@ -637,7 +722,8 @@ async def ms_open(ctx, row: int, col: int):
         async with db_lock:
             c.execute('DELETE FROM mines WHERE owner_id=?', (ctx.author.id,))
             conn.commit()
-        return await ctx.send('\n'.join(out) + '\nВы подорвались! Поле удалено.')
+        bal = await get_balance(ctx.author.id)
+        return await send_reply(ctx, content='\n'.join(out) + f'\nВы подорвались! Поле удалено.\nТекущий баланс: {bal} {CURRENCY}')
 
     revealed = [[False] * cols for _ in range(rows)]
     q = deque()
@@ -658,7 +744,8 @@ async def ms_open(ctx, row: int, col: int):
     for r in range(rows):
         line = f'{r:2d} ' + ' '.join((f'{board[r][c]} ' if revealed[r][c] else '▢ ') for c in range(cols))
         out.append(line)
-    await ctx.send('\n'.join(out))
+    bal = await get_balance(ctx.author.id)
+    return await send_reply(ctx, content='\n'.join(out) + f"\nТекущий баланс: {bal} {CURRENCY}")
 
 # ----------------- VOICE INFO -----------------
 @bot.command()
@@ -668,7 +755,7 @@ async def voiceinfo(ctx):
     embed.add_field(name='Минимум оплачиваемого времени', value=f'{VOICE_MIN_SECONDS} секунд', inline=False)
     embed.add_field(name='Лимит в день', value=f'{VOICE_DAILY_LIMIT} {CURRENCY}', inline=False)
     embed.add_field(name='AFK-каналы исключены', value=str(VOICE_IGNORE_AFK), inline=False)
-    await ctx.send(embed=embed)
+    return await send_reply(ctx, embed=embed)
 
 # ----------------- STARTUP -----------------
 @bot.event
@@ -680,4 +767,3 @@ async def on_ready():
 # ----------------- RUN -----------------
 if __name__ == '__main__':
     bot.run(TOKEN)
-
