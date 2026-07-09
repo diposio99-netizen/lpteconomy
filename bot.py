@@ -64,26 +64,83 @@ db_lock = asyncio.Lock()
 work_cooldowns = {}
 
 # ----------------- UTIL -----------------
-async def send_reply(ctx, content: str = None, embed: discord.Embed = None):
+def requester_name(ctx) -> str:
     """
-    Отправляет сообщение и автоматически тегает автора команды (ctx.author.mention).
-    Если передан embed — подпись с упоминанием добавляется в footer, иначе упоминание добавляется в начало текста.
+    Возвращает отображаемое имя пользователя (display_name) или fallback str(ctx.author).
+    Не производит упоминания/пинга.
     """
-    try:
-        if embed:
-            footer = embed.footer.text or ''
-            mention = f'Запросил: {ctx.author.mention}'
-            if footer:
-                embed.set_footer(text=f"{footer} • {mention}")
+    return getattr(ctx.author, "display_name", str(ctx.author))
+
+async def send_reply(ctx, content: str = None, embed: discord.Embed = None, soft: bool = False):
+    """Унифицированная отправка ответов.
+    - content: текстовое сообщение
+    - embed: discord.Embed объект (если передан, будет дополнен автором/footer'ом)
+    - soft: если True — добавляет заметку о запросившем в скобках в конце контента,
+            иначе добавляет отдельную строку "Запросил: Ник" перед текстом.
+
+    Использует display_name вместо упоминания (ctx.author.mention).
+    """
+    requester = requester_name(ctx)
+
+    # Формируем текст
+    text = None
+    if content:
+        if soft:
+            text = f"{content}  (Запросил: {requester})"
+        else:
+            text = f"Запросил: {requester}\n{content}"
+
+    # Обрабатываем Embed: добавим автора и footer с ником запросившего
+    if embed is not None:
+        try:
+            # Поддерживаем разные версии discord.py/pycord/nextcord: проверяем доступные поля для аватара
+            avatar_url = None
+            if hasattr(ctx.author, "display_avatar"):
+                try:
+                    avatar_url = ctx.author.display_avatar.url
+                except Exception:
+                    avatar_url = None
+            if not avatar_url:
+                if hasattr(ctx.author, "avatar_url"):
+                    avatar_url = ctx.author.avatar_url
+                elif hasattr(ctx.author, "avatar"):
+                    avatar_url = str(ctx.author.avatar) if ctx.author.avatar else None
+
+            if avatar_url:
+                embed.set_author(name=requester, icon_url=str(avatar_url))
             else:
-                embed.set_footer(text=mention)
+                embed.set_author(name=requester)
+
+            existing_footer = ""
+            if getattr(embed, "footer", None) and getattr(embed.footer, "text", None):
+                existing_footer = embed.footer.text
+
+            footer_text = f"{existing_footer} • Запросил: {requester}" if existing_footer else f"Запросил: {requester}"
+            embed.set_footer(text=footer_text)
+        except Exception:
+            # если что-то не поддерживается — не мешаем отправке
+            pass
+
+    # Отправляем сообщение
+    try:
+        if text and embed:
+            return await ctx.send(text, embed=embed)
+        elif text:
+            return await ctx.send(text)
+        elif embed:
             return await ctx.send(embed=embed)
         else:
-            return await ctx.send(f'{ctx.author.mention} {content}')
+            return
     except Exception:
-        if embed:
-            return await ctx.send(embed=embed)
-        return await ctx.send(content)
+        # fallback: попытаться отправить embed без модификаций или простой текст
+        try:
+            if embed:
+                return await ctx.send(embed=embed)
+        except Exception:
+            pass
+        if text:
+            return await ctx.send(content)
+        return
 
 def safe_member_avatar(member):
     try:
@@ -402,7 +459,7 @@ async def shop(ctx, action: str = None, role: discord.Role = None, price: int = 
             await change_balance(ctx.author.id, price)
             return await send_reply(ctx, content='Не удалось выдать роль: ' + str(e))
         new_bal = await get_balance(ctx.author.id)
-        embed = discord.Embed(description=f'{ctx.author.mention} купил роль **{role.name}** за **{price} {CURRENCY}**', color=0x57F287)
+        embed = discord.Embed(description=f'{ctx.author.display_name} купил роль **{role.name}** за **{price} {CURRENCY}**', color=0x57F287)
         embed.add_field(name='Текущий баланс', value=f'{new_bal} {CURRENCY}', inline=False)
         return await send_reply(ctx, embed=embed)
 
@@ -767,3 +824,4 @@ async def on_ready():
 # ----------------- RUN -----------------
 if __name__ == '__main__':
     bot.run(TOKEN)
+
