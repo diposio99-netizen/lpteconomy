@@ -24,11 +24,13 @@ if not os.path.exists(DB_PATH):
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 c = conn.cursor()
 
-c.execute('''CREATE TABLE IF NOT EXISTS users(
+# NOTE: sqlite3 does not accept parameter placeholders inside DDL statements for default values.
+# Insert the START_BALANCE value directly into the CREATE TABLE SQL.
+c.execute(f"""CREATE TABLE IF NOT EXISTS users(
     user_id INTEGER PRIMARY KEY,
-    balance INTEGER DEFAULT ?,
+    balance INTEGER DEFAULT {START_BALANCE},
     last_daily TEXT
-)''', (START_BALANCE,))
+)""")
 
 c.execute('''CREATE TABLE IF NOT EXISTS shop(
     role_id INTEGER PRIMARY KEY,
