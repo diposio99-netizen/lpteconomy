@@ -16,7 +16,7 @@ RPS_FRAMES = ['✊', '✋', '✌️']
 RPS_ANIM_DELAY = 0.45
 MAX_TOP = 25
 VOICE_COINS_PER_MIN = 1           # монет в минуту
-VOICE_MIN_SECONDS = 60            # минимальное оплачиваемое время в сек
+VOICE_MIN_SECONDS = 60            # минимальное оплачиваемое время в секундах
 VOICE_DAILY_LIMIT = 300           # лимит монет в день за голосовую
 VOICE_IGNORE_AFK = True           # не платить в AFK каналах
 VOICE_AFK_CATEGORY_NAMES = ['AFK', 'afk']  # дополнительные названия категорий для исключения
@@ -192,8 +192,6 @@ async def flush_voice_sessions():
     for uid, duration in to_process:
         try:
             guild = None
-            # try to find guild via channels
-            # best-effort: skip guild param in message
             await process_voice_session(uid, duration, guild)
         except Exception as e:
             print('flush error', e)
@@ -300,7 +298,6 @@ async def top(ctx, limit: int = 10):
         member = ctx.guild.get_member(uid)
         name = member.display_name if member else str(uid)
         avatar = member.display_avatar.url if member else None
-        # field per user with avatar in footer for first only
         embed.add_field(name=f'{i}. {name}', value=f'`{bal} {CURRENCY}`', inline=False)
         if i == 1 and avatar:
             embed.set_thumbnail(url=avatar)
@@ -371,23 +368,64 @@ async def shop(ctx, action: str = None, role: discord.Role = None, price: int = 
 @bot.command()
 async def coin(ctx, guess: str = None, bet: int = 0):
     guess = (guess or '').lower()
-    if guess and guess not in ('heads','tails'):
-        return await ctx.send('Угадайте `heads` или `tails`. Пример: `!coin heads 50`')
+    if guess and guess not in ('орёл','решка','heads','tails'):
+        return await ctx.send('Угадайте `орёл` или `решка`. Пример: `!coin орёл 50`')
+    # accept рус/eng synonyms
+    if guess == 'орёл': guess = 'heads'
+    if guess == 'решка': guess = 'tails'
     bet = max(0, bet)
     bal = await get_balance(ctx.author.id)
     if bet and bal < bet:
         return await ctx.send('Недостаточно средств для ставки')
     result = random.choice(['heads','tails'])
+    res_text = 'орёл' if result=='heads' else 'решка'
     if bet:
         if guess and result == guess:
             await change_balance(ctx.author.id, bet)
-            return await ctx.send(embed=discord.Embed(description=f'Выпало **{result}** — вы выиграли **{bet} {CURRENCY}**', color=0x2ECC71))
+            return await ctx.send(embed=discord.Embed(description=f'Выпало **{res_text}** — вы выиграли **{bet} {CURRENCY}**', color=0x2ECC71))
+        else:
+            await change_balance(ctx.author.id, -bet)
+            return await ctx.send(embed=discord.Embed(description=f'Выпало **{res_text}** — вы проиграли **{bet} {CURRENCY}**', color=0xE74C3C))
+    await ctx.send(embed=discord.Embed(description=f'Выпало **{res_text}**').set_footer(text='Используйте ставку: !coin орёл 50'))
+
+@bot.command()
+async def dice(ctx, sides: int = 6, bet: int = 0):
+    sides = max(2, min(100, sides))
+    bet = max(0, bet)
+    bal = await get_balance(ctx.author.id)
+    if bet and bal < bet:
+        return await ctx.send('Недостаточно средств для ставки')
+    result = random.randint(1, sides)
+    if bet:
+        if result == sides:
+            win = bet * (sides//2)
+            await change_balance(ctx.author.id, win)
+            return await ctx.send(embed=discord.Embed(description=f'Выпало **{result}** — джекпот! Вы получили **{win} {CURRENCY}**', color=0x2ECC71))
         else:
             await change_balance(ctx.author.id, -bet)
             return await ctx.send(embed=discord.Embed(description=f'Выпало **{result}** — вы проиграли **{bet} {CURRENCY}**', color=0xE74C3C))
-    await ctx.send(embed=discord.Embed(description=f'Выпало **{result}**').set_footer(text='Используйте ставку: !coin heads 50'))
+    await ctx.send(embed=discord.Embed(description=f'Выпало **{result}**'))
 
-# Interactive blackjack (DM-based, reactions)
+@bot.command()
+async def slots(ctx, bet: int = 0):
+    bet = max(0, bet)
+    bal = await get_balance(ctx.author.id)
+    if bet and bal < bet:
+        return await ctx.send('Недостаточно средств для ставки')
+    symbols = ['🍒','🍋','🍊','🔔','💎']
+    r = [random.choice(symbols) for _ in range(3)]
+    line = ' | '.join(r)
+    if bet:
+        if r[0]==r[1]==r[2]:
+            win = bet * 5
+            await change_balance(ctx.author.id, win)
+            return await ctx.send(embed=discord.Embed(description=f'{line} — Вы выиграли **{win} {CURRENCY}**!', color=0x2ECC71))
+        else:
+            await change_balance(ctx.author.id, -bet)
+            return await ctx.send(embed=discord.Embed(description=f'{line} — Вы проиграли **{bet} {CURRENCY}**', color=0xE74C3C))
+    await ctx.send(embed=discord.Embed(description=line))
+
+# Interactive blackjack (DM-based, Russian commands)
 BLACKJACK_TIMEOUT = 60
 
 class BJGame:
@@ -426,20 +464,19 @@ async def blackjack(ctx, bet: int = 0):
     if bet and bal < bet:
         return await ctx.send('Недостаточно средств для ставки')
     game = BJGame(ctx, bet)
-    # charge bet now (will refund if draw)
     if bet:
         await change_balance(ctx.author.id, -bet)
-    # send DM for interaction
     try:
         dm = await ctx.author.create_dm()
-        msg = await dm.send('Начинаем блекджек! Ответьте `hit` или `stand` в течение 60 секунд.')
+        await dm.send('Начинаем блекджек! В DM отвечайте командами: `взять` или `стоять` (или `хит`/`стенд`) в течение 60 секунд.')
     except Exception:
-        return await ctx.send('Не удалось отправить DM. Включите приём личных сообщений от участников сервера.')
+        if bet:
+            await change_balance(ctx.author.id, bet)
+        return await ctx.send('Не удалось отправить личное сообщение. Включите приём личных сообщений от участников сервера.')
 
-    # immediate check for blackjacks
     if game.is_blackjack(game.player) and game.is_blackjack(game.dealer):
         if bet:
-            await change_balance(ctx.author.id, bet)  # refund
+            await change_balance(ctx.author.id, bet)
         return await dm.send(game.player_text() + '\n' + game.dealer_text(reveal=True) + '\nНичья (оба Blackjack).')
     if game.is_blackjack(game.player):
         if bet:
@@ -448,17 +485,17 @@ async def blackjack(ctx, bet: int = 0):
 
     # player's turn
     while True:
-        await dm.send(game.player_text() + '\n' + game.dealer_text(reveal=False) + '\nНапишите `hit` или `stand`.')
+        await dm.send(game.player_text() + '\n' + game.dealer_text(reveal=False) + '\nНапишите `взять`/`хит` для получения карты или `стоять`/`стенд` для остановки.')
         try:
             def check(m):
-                return m.author == ctx.author and isinstance(m.channel, discord.DMChannel) and m.content.lower() in ('hit','stand')
+                return m.author == ctx.author and isinstance(m.channel, discord.DMChannel) and m.content.lower() in ('взять','хит','стоять','стенд')
             resp = await bot.wait_for('message', check=check, timeout=BLACKJACK_TIMEOUT)
         except asyncio.TimeoutError:
-            # refund half bet? we'll refund full bet for safety
             if bet:
                 await change_balance(ctx.author.id, bet)
             return await dm.send('Время вышло — игра отменена, ставка возвращена.')
-        if resp.content.lower() == 'hit':
+        cmd = resp.content.lower()
+        if cmd in ('взять','хит'):
             game.player.append(game.deck.pop())
             if game.total(game.player) > 21:
                 return await dm.send(game.player_text() + '\nПеребор! Вы проиграли.' )
@@ -483,7 +520,7 @@ async def blackjack(ctx, bet: int = 0):
     else:
         res = 'Вы проиграли.'
     await dm.send(game.player_text() + '\n' + game.dealer_text(reveal=True) + '\n' + res)
-    await ctx.send(f'{ctx.author.mention}, результаты блекджека отправлены в DM.')
+    await ctx.send(f'{ctx.author.mention}, результаты блекджека отправлены в личные сообщения.')
 
 # Minesweeper with flood-fill and DB save/load
 @bot.command()
@@ -507,9 +544,7 @@ async def minesweeper(ctx, rows: int = 6, cols: int = 6, bombs: int = 8):
                 board[r][c] = 'B'
             else:
                 board[r][c] = sum(1 for n in neighbors(r,c) if n in bombs_pos)
-    # save board
     await save_mine(ctx.author.id, board, rows, cols)
-    # send masked
     header = '   ' + ' '.join(f'{i:2d}' for i in range(cols))
     lines = [header]
     for r in range(rows):
@@ -528,7 +563,6 @@ async def ms_open(ctx, row: int, col: int):
         return await ctx.send('Неверные координаты')
     val = board[row][col]
     if val == 'B':
-        # reveal all and delete
         out = ['   ' + ' '.join(f'{i:2d}' for i in range(cols))]
         for r in range(rows):
             out.append(f'{r:2d} ' + ' '.join('B ' if board[r][c]=='B' else f'{board[r][c]} ' for c in range(cols)))
@@ -536,7 +570,6 @@ async def ms_open(ctx, row: int, col: int):
             c.execute('DELETE FROM mines WHERE owner_id=?', (ctx.author.id,))
             conn.commit()
         return await ctx.send('\n'.join(out) + '\nВы подорвались! Поле удалено.')
-    # flood-fill
     revealed = [[False]*cols for _ in range(rows)]
     q = deque()
     q.append((row,col))
@@ -576,4 +609,3 @@ async def on_ready():
 # ----------------- RUN -----------------
 if __name__ == '__main__':
     bot.run(TOKEN)
-
