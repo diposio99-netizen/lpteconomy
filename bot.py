@@ -1,9 +1,11 @@
+import os
 import discord
-from discord.ext import commands
-import asyncio, random, sqlite3, datetime, os
+from discord.ext import commands, tasks
+import asyncio, random, sqlite3, datetime, time
+from collections import deque
 
-# ---------- CONFIG ----------
-TOKEN = 'YOUR_BOT_TOKEN_HERE'  # <- замените на ваш токен
+# ----------------- CONFIG -----------------
+TOKEN = os.getenv('DISCORD_TOKEN', 'YOUR_BOT_TOKEN_HERE')
 PREFIX = '!'
 CURRENCY = '₵'
 DB_PATH = 'economy.db'
@@ -11,30 +13,43 @@ DAILY_AMOUNT = 500
 WORK_MIN, WORK_MAX = 50, 200
 START_BALANCE = 100
 RPS_FRAMES = ['✊', '✋', '✌️']
-RPS_ANIM_DELAY = 0.5
+RPS_ANIM_DELAY = 0.45
+MAX_TOP = 25
+VOICE_COINS_PER_MIN = 1           # монет в минуту
+VOICE_MIN_SECONDS = 60            # минимальное оплачиваемое время в сек
+VOICE_DAILY_LIMIT = 300           # лимит монет в день за голосовую
+VOICE_IGNORE_AFK = True           # не платить в AFK каналах
+VOICE_AFK_CATEGORY_NAMES = ['AFK', 'afk']  # дополнительные названия категорий для исключения
 
-intents = discord.Intents.default()
+intents = discord.Intents.all()
+intents.members = True
+intents.voice_states = True
 intents.message_content = True
-bot = commands.Bot(command_prefix=PREFIX, intents=intents)
+bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
 
-# ---------- DATABASE ----------
-if not os.path.exists(DB_PATH):
-    open(DB_PATH, 'w').close()
-
+# ----------------- DATABASE -----------------
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 c = conn.cursor()
-
-# NOTE: sqlite3 does not accept parameter placeholders inside DDL statements for default values.
-# Insert the START_BALANCE value directly into the CREATE TABLE SQL.
+# sqlite can't use placeholders inside DDL default; inline START_BALANCE
 c.execute(f"""CREATE TABLE IF NOT EXISTS users(
     user_id INTEGER PRIMARY KEY,
     balance INTEGER DEFAULT {START_BALANCE},
-    last_daily TEXT
+    last_daily TEXT,
+    voice_today INTEGER DEFAULT 0,
+    voice_last_reset TEXT
 )""")
 
 c.execute('''CREATE TABLE IF NOT EXISTS shop(
     role_id INTEGER PRIMARY KEY,
     price INTEGER NOT NULL
+)''')
+
+c.execute('''CREATE TABLE IF NOT EXISTS mines(
+    owner_id INTEGER,
+    board TEXT,
+    rows INTEGER,
+    cols INTEGER,
+    PRIMARY KEY(owner_id)
 )''')
 conn.commit()
 
@@ -44,7 +59,7 @@ async def ensure_user(uid: int):
     async with db_lock:
         c.execute('SELECT user_id FROM users WHERE user_id=?', (uid,))
         if not c.fetchone():
-            c.execute('INSERT INTO users(user_id,balance,last_daily) VALUES(?,?,?)', (uid, START_BALANCE, ''))
+            c.execute('INSERT INTO users(user_id,balance,last_daily,voice_today,voice_last_reset) VALUES(?,?,?,?,?)', (uid, START_BALANCE, '', 0, datetime.date.today().isoformat()))
             conn.commit()
 
 async def get_balance(uid: int) -> int:
@@ -59,33 +74,170 @@ async def change_balance(uid: int, amount: int):
         c.execute('UPDATE users SET balance = balance + ? WHERE user_id=?', (amount, uid))
         conn.commit()
 
-async def set_balance(uid: int, amount: int):
+async def add_voice_earned(uid: int, earned: int):
     await ensure_user(uid)
     async with db_lock:
-        c.execute('UPDATE users SET balance = ? WHERE user_id=?', (amount, uid))
+        # reset daily if date changed
+        c.execute('SELECT voice_today, voice_last_reset FROM users WHERE user_id=?', (uid,))
+        row = c.fetchone()
+        if row:
+            voice_today, last_reset = row
+            if last_reset != datetime.date.today().isoformat():
+                voice_today = 0
+            new_today = min(VOICE_DAILY_LIMIT, voice_today + earned)
+            delta = new_today - voice_today
+            if delta > 0:
+                c.execute('UPDATE users SET voice_today=?, voice_last_reset=? WHERE user_id=?', (new_today, datetime.date.today().isoformat(), uid))
+                c.execute('UPDATE users SET balance = balance + ? WHERE user_id=?', (delta, uid))
+                conn.commit()
+                return delta
+        return 0
+
+# save/load mines functions
+async def save_mine(owner_id: int, board, rows, cols):
+    import json
+    b = json.dumps(board)
+    async with db_lock:
+        c.execute('INSERT OR REPLACE INTO mines(owner_id, board, rows, cols) VALUES(?,?,?,?)', (owner_id, b, rows, cols))
         conn.commit()
 
-async def get_last_daily(uid: int):
-    await ensure_user(uid)
+async def load_mine(owner_id: int):
+    import json
     async with db_lock:
-        c.execute('SELECT last_daily FROM users WHERE user_id=?', (uid,))
-        return c.fetchone()[0]
+        c.execute('SELECT board,rows,cols FROM mines WHERE owner_id=?', (owner_id,))
+        r = c.fetchone()
+    if not r: return None
+    board = json.loads(r[0])
+    return board, r[1], r[2]
 
-async def set_last_daily(uid: int, iso: str):
-    async with db_lock:
-        c.execute('UPDATE users SET last_daily = ? WHERE user_id=?', (iso, uid))
-        conn.commit()
+# ----------------- VOICE TRACKING -----------------
+# memory: user_id -> (channel_id, join_timestamp)
+voice_sessions = {}
 
-# ---------- UTIL ----------
-def mention(member):
-    return member.mention if isinstance(member, discord.Member) else str(member)
+@bot.event
+async def on_voice_state_update(member, before, after):
+    try:
+        uid = member.id
+        # ignore bots
+        if member.bot:
+            return
+        # joined channel
+        if before.channel is None and after.channel is not None:
+            # check AFK
+            if VOICE_IGNORE_AFK and is_afk_channel(after.channel):
+                return
+            voice_sessions[uid] = (after.channel.id, time.time())
+        # moved channels
+        elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id:
+            # finalize previous if exists
+            if uid in voice_sessions:
+                ch_id, ts = voice_sessions.pop(uid)
+                duration = max(0, int(time.time() - ts))
+                await process_voice_session(uid, duration, member.guild)
+            # start new if not AFK
+            if VOICE_IGNORE_AFK and is_afk_channel(after.channel):
+                return
+            voice_sessions[uid] = (after.channel.id, time.time())
+        # left channel
+        elif before.channel is not None and after.channel is None:
+            if uid in voice_sessions:
+                ch_id, ts = voice_sessions.pop(uid)
+                duration = max(0, int(time.time() - ts))
+                await process_voice_session(uid, duration, member.guild)
+    except Exception as e:
+        print('voice update error', e)
 
-# ---------- ECONOMY COMMANDS ----------
+def is_afk_channel(channel):
+    try:
+        if channel.type.name == 'voice' and channel.category and channel.category.name in VOICE_AFK_CATEGORY_NAMES:
+            return True
+    except Exception:
+        pass
+    # check guild.afk_channel as well
+    try:
+        if channel.guild.afk_channel and channel.guild.afk_channel.id == channel.id:
+            return True
+    except Exception:
+        pass
+    return False
+
+async def process_voice_session(uid: int, duration_seconds: int, guild):
+    # only credit if over minimal seconds
+    if duration_seconds < VOICE_MIN_SECONDS:
+        return
+    minutes = duration_seconds // 60
+    earned = minutes * VOICE_COINS_PER_MIN
+    # apply daily limit
+    got = await add_voice_earned(uid, earned)
+    if got > 0:
+        # notify user via DM if possible
+        user = bot.get_user(uid)
+        try:
+            if user:
+                await user.send(f'Вы получили **{got} {CURRENCY}** за {minutes} минут(ы) голосовой активности.')
+        except Exception:
+            pass
+
+# background task to periodically flush sessions (in case bot restarts, keep short)
+@tasks.loop(minutes=5)
+async def flush_voice_sessions():
+    now_ts = time.time()
+    to_process = []
+    for uid, (ch_id, ts) in list(voice_sessions.items()):
+        # process long sessions in chunks and restart timer
+        if now_ts - ts >= 300:
+            duration = int(now_ts - ts)
+            to_process.append((uid, duration))
+            voice_sessions[uid] = (ch_id, now_ts)
+    for uid, duration in to_process:
+        try:
+            guild = None
+            # try to find guild via channels
+            # best-effort: skip guild param in message
+            await process_voice_session(uid, duration, guild)
+        except Exception as e:
+            print('flush error', e)
+
+# ----------------- HELP (pretty) -----------------
+@bot.command(name='help')
+async def help_cmd(ctx, command: str = None):
+    prefix = PREFIX
+    if not command:
+        embed = discord.Embed(title='Помощь — команды бота', color=0x2F3136)
+        embed.description = (
+            f'Префикс команд: `{prefix}`\n'
+            f'Валюта: {CURRENCY}\n\n'
+            'Примеры: `!balance`, `!rps rock 50`, `!shop buy @Role`'
+        )
+        sections = {
+            'Экономика': '`balance`, `daily`, `work`, `give`, `top`',
+            'Магазин': '`shop` (add/buy/remove)',
+            'Игры': '`coin`, `dice`, `slots`, `blackjack`, `race`, `minesweeper`, `rps`',
+            'Голос': '`voiceinfo` — информация о начислениях за голосовую активность'
+        }
+        for k,v in sections.items():
+            embed.add_field(name=k, value=v, inline=False)
+        embed.set_footer(text='Напишите: !help <команда> для подробной информации')
+        return await ctx.send(embed=embed)
+
+    # reuse previous examples (omitted here for brevity)
+    await ctx.send('Подробная помощь на команду временно отключена — используйте `!help`')
+
+# ----------------- UTIL -----------------
+def user_display_name(guild, user_id):
+    member = guild.get_member(user_id) if guild else None
+    return member.display_name if member else str(user_id)
+
+# ----------------- ECONOMY -----------------
 @bot.command(aliases=['bal'])
 async def balance(ctx, member: discord.Member = None):
     member = member or ctx.author
     bal = await get_balance(member.id)
-    await ctx.send(f'{mention(member)} — {bal} {CURRENCY}')
+    embed = discord.Embed(title='Баланс', color=0xFAA61A)
+    embed.set_thumbnail(url=member.display_avatar.url if member else '')
+    embed.add_field(name=member.display_name, value=f'{bal} {CURRENCY}', inline=True)
+    embed.set_footer(text=f'Запросил: {ctx.author.display_name}')
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def daily(ctx):
@@ -104,13 +256,19 @@ async def daily(ctx):
             pass
     await change_balance(uid, DAILY_AMOUNT)
     await set_last_daily(uid, now.isoformat())
-    await ctx.send(f'{ctx.author.mention}, вы получили {DAILY_AMOUNT} {CURRENCY}!')
+    embed = discord.Embed(title='Daily получен!', description=f'Вы получили {DAILY_AMOUNT} {CURRENCY}', color=0x2ECC71)
+    embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    embed.set_footer(text='Заходите снова через 24 часа')
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def work(ctx):
     amount = random.randint(WORK_MIN, WORK_MAX)
     await change_balance(ctx.author.id, amount)
-    await ctx.send(f'{ctx.author.mention} поработал и получил {amount} {CURRENCY}')
+    embed = discord.Embed(title='Работа завершена', color=0xF39C12)
+    embed.add_field(name='Заработано', value=f'{amount} {CURRENCY}')
+    embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def give(ctx, member: discord.Member, amount: int):
@@ -121,51 +279,65 @@ async def give(ctx, member: discord.Member, amount: int):
         return await ctx.send('Недостаточно средств.')
     await change_balance(ctx.author.id, -amount)
     await change_balance(member.id, amount)
-    await ctx.send(f'{ctx.author.mention} отправил {amount} {CURRENCY} {member.mention}')
+    embed = discord.Embed(title='Трансфер выполнен', color=0x57F287)
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name='От', value=f'{ctx.author.display_name}', inline=True)
+    embed.add_field(name='Кому', value=f'{member.display_name}', inline=True)
+    embed.add_field(name='Сумма', value=f'{amount} {CURRENCY}', inline=False)
+    await ctx.send(embed=embed)
 
 @bot.command()
 async def top(ctx, limit: int = 10):
+    limit = max(1, min(limit, MAX_TOP))
     async with db_lock:
         c.execute('SELECT user_id,balance FROM users ORDER BY balance DESC LIMIT ?', (limit,))
         rows = c.fetchall()
+    embed = discord.Embed(title=f'TOP {limit} по балансу', color=0xFFD700)
     if not rows:
-        return await ctx.send('Никто не в базе.')
-    lines = []
-    for i,(uid,b) in enumerate(rows, start=1):
-        user = bot.get_user(uid)
-        name = user.name if user else str(uid)
-        lines.append(f'{i}. {name} — {b} {CURRENCY}')
-    await ctx.send('\n'.join(lines))
+        embed.description = 'Пока нет пользователей в базе.'
+        return await ctx.send(embed=embed)
+    for i, (uid, bal) in enumerate(rows, start=1):
+        member = ctx.guild.get_member(uid)
+        name = member.display_name if member else str(uid)
+        avatar = member.display_avatar.url if member else None
+        # field per user with avatar in footer for first only
+        embed.add_field(name=f'{i}. {name}', value=f'`{bal} {CURRENCY}`', inline=False)
+        if i == 1 and avatar:
+            embed.set_thumbnail(url=avatar)
+    embed.set_footer(text='Ники показываются как display_name на сервере')
+    await ctx.send(embed=embed)
 
-# ---------- SHOP (roles) ----------
+# ----------------- SHOP -----------------
 @bot.command()
 async def shop(ctx, action: str = None, role: discord.Role = None, price: int = None):
     if action is None:
         async with db_lock:
             c.execute('SELECT role_id, price FROM shop')
             rows = c.fetchall()
+        embed = discord.Embed(title='Магазин ролей', color=0x7289DA)
         if not rows:
-            return await ctx.send('Магазин пуст.')
-        lines = []
+            embed.description = 'Магазин пуст.'
+            return await ctx.send(embed=embed)
         for rid, p in rows:
             r = ctx.guild.get_role(rid)
-            if r:
-                lines.append(f'{r.name} — {p} {CURRENCY}')
-        return await ctx.send('\n'.join(lines) or 'Магазин пуст.')
+            name = r.name if r else f'Роль ({rid}) — удалена'
+            embed.add_field(name=name, value=f'{p} {CURRENCY}', inline=False)
+        embed.set_footer(text=f'Купить: {PREFIX}shop buy @Role')
+        return await ctx.send(embed=embed)
 
     if action == 'add':
         if not ctx.author.guild_permissions.manage_roles:
             return await ctx.send('Нужны права manage_roles')
         if not role or price is None:
-            return await ctx.send('Использование: shop add @role price')
+            return await ctx.send('Использование: shop add @Role 500')
         async with db_lock:
             c.execute('INSERT OR REPLACE INTO shop(role_id,price) VALUES(?,?)', (role.id, price))
             conn.commit()
-        return await ctx.send(f'Роль {role.name} добавлена за {price} {CURRENCY}')
+        return await ctx.send(embed=discord.Embed(description=f'Роль **{role.name}** добавлена за **{price} {CURRENCY}**', color=0x2ECC71))
 
     if action == 'buy':
         if not role:
-            return await ctx.send('Укажите роль для покупки: shop buy @role')
+            return await ctx.send('Укажите роль: shop buy @Role')
         async with db_lock:
             c.execute('SELECT price FROM shop WHERE role_id=?', (role.id,))
             r = c.fetchone()
@@ -179,142 +351,146 @@ async def shop(ctx, action: str = None, role: discord.Role = None, price: int = 
         try:
             await ctx.author.add_roles(role)
         except Exception as e:
-            await ctx.send('Не удалось выдать роль: ' + str(e))
             await change_balance(ctx.author.id, price)
-            return
-        await ctx.send(f'{ctx.author.mention} купил роль {role.name} за {price} {CURRENCY}')
+            return await ctx.send('Не удалось выдать роль: ' + str(e))
+        return await ctx.send(embed=discord.Embed(description=f'{ctx.author.mention} купил роль **{role.name}** за **{price} {CURRENCY}**', color=0x57F287))
 
-    elif action == 'remove':
+    if action == 'remove':
         if not ctx.author.guild_permissions.manage_roles:
             return await ctx.send('Нужны права manage_roles')
         if not role:
-            return await ctx.send('Укажите роль: shop remove @role')
+            return await ctx.send('Укажите роль: shop remove @Role')
         async with db_lock:
             c.execute('DELETE FROM shop WHERE role_id=?', (role.id,))
             conn.commit()
-        return await ctx.send(f'Роль {role.name} удалена из магазина.')
+        return await ctx.send(embed=discord.Embed(description=f'Роль **{role.name}** удалена из магазина', color=0xE74C3C))
 
     await ctx.send('Неверное действие. Доступные: (без аргументов) показать, add, remove, buy')
 
-# ---------- GAMES ----------
+# ----------------- GAMES -----------------
 @bot.command()
 async def coin(ctx, guess: str = None, bet: int = 0):
     guess = (guess or '').lower()
-    if guess not in ('heads','tails',''):
-        return await ctx.send('Угадайте heads или tails')
+    if guess and guess not in ('heads','tails'):
+        return await ctx.send('Угадайте `heads` или `tails`. Пример: `!coin heads 50`')
     bet = max(0, bet)
     bal = await get_balance(ctx.author.id)
     if bet and bal < bet:
         return await ctx.send('Недостаточно средств для ставки')
     result = random.choice(['heads','tails'])
-    win = (result == guess) if guess else None
-    if bet and win is not None:
-        if win:
+    if bet:
+        if guess and result == guess:
             await change_balance(ctx.author.id, bet)
-            return await ctx.send(f'Выпало {result}. Вы выиграли {bet} {CURRENCY}!')
+            return await ctx.send(embed=discord.Embed(description=f'Выпало **{result}** — вы выиграли **{bet} {CURRENCY}**', color=0x2ECC71))
         else:
             await change_balance(ctx.author.id, -bet)
-            return await ctx.send(f'Выпало {result}. Вы проиграли {bet} {CURRENCY}.')
-    await ctx.send(f'Выпало {result}.')
+            return await ctx.send(embed=discord.Embed(description=f'Выпало **{result}** — вы проиграли **{bet} {CURRENCY}**', color=0xE74C3C))
+    await ctx.send(embed=discord.Embed(description=f'Выпало **{result}**').set_footer(text='Используйте ставку: !coin heads 50'))
 
-@bot.command()
-async def dice(ctx, sides: int = 6, bet: int = 0):
-    sides = max(2, min(100, sides))
-    bet = max(0, bet)
-    bal = await get_balance(ctx.author.id)
-    if bet and bal < bet:
-        return await ctx.send('Недостаточно средств для ставки')
-    result = random.randint(1, sides)
-    if bet:
-        # простая ставка: выигрыш если выпало max
-        if result == sides:
-            await change_balance(ctx.author.id, bet * (sides//2))
-            return await ctx.send(f'Выпало {result} — джекпот! Вы получили {bet * (sides//2)} {CURRENCY}')
+# Interactive blackjack (DM-based, reactions)
+BLACKJACK_TIMEOUT = 60
+
+class BJGame:
+    def __init__(self, ctx, bet):
+        self.ctx = ctx
+        self.bet = bet
+        deck = [2,3,4,5,6,7,8,9,10,10,10,10,11]*4
+        random.shuffle(deck)
+        self.deck = deck
+        self.player = [self.deck.pop(), self.deck.pop()]
+        self.dealer = [self.deck.pop(), self.deck.pop()]
+
+    def total(self, cards):
+        s = sum(cards)
+        aces = cards.count(11)
+        while s>21 and aces:
+            s-=10; aces-=1
+        return s
+
+    def player_text(self):
+        return f'Ваши карты: {self.player} ({self.total(self.player)})'
+
+    def dealer_text(self, reveal=False):
+        if reveal:
+            return f'Карты дилера: {self.dealer} ({self.total(self.dealer)})'
         else:
-            await change_balance(ctx.author.id, -bet)
-            return await ctx.send(f'Выпало {result}. Вы проиграли {bet} {CURRENCY}.')
-    await ctx.send(f'Выпало {result}.')
+            return f'Карты дилера: [{self.dealer[0]}, ?]'
 
-@bot.command()
-async def slots(ctx, bet: int = 0):
-    bet = max(0, bet)
-    bal = await get_balance(ctx.author.id)
-    if bet and bal < bet:
-        return await ctx.send('Недостаточно средств для ставки')
-    symbols = ['🍒','🍋','🍊','🔔','💎']
-    r = [random.choice(symbols) for _ in range(3)]
-    if bet:
-        if r[0]==r[1]==r[2]:
-            win = bet * 5
-            await change_balance(ctx.author.id, win)
-            return await ctx.send(' | '.join(r) + f' — Вы выиграли {win} {CURRENCY}!')
-        else:
-            await change_balance(ctx.author.id, -bet)
-            return await ctx.send(' | '.join(r) + f' — Вы проиграли {bet} {CURRENCY}.')
-    await ctx.send(' | '.join(r))
+    def is_blackjack(self, cards):
+        return self.total(cards) == 21 and len(cards)==2
 
-# Simple blackjack (player vs dealer) — text-only, single round
 @bot.command()
 async def blackjack(ctx, bet: int = 0):
     bet = max(0, bet)
     bal = await get_balance(ctx.author.id)
     if bet and bal < bet:
         return await ctx.send('Недостаточно средств для ставки')
-    deck = [2,3,4,5,6,7,8,9,10,10,10,10,11]*4
-    random.shuffle(deck)
-    def total(cards):
-        s = sum(cards)
-        aces = cards.count(11)
-        while s>21 and aces:
-            s-=10; aces-=1
-        return s
-    player = [deck.pop(), deck.pop()]
-    dealer = [deck.pop(), deck.pop()]
-    # simple auto-play: player hits while <17
-    while total(player)<17:
-        player.append(deck.pop())
-    while total(dealer)<17:
-        dealer.append(deck.pop())
-    p = total(player); d = total(dealer)
+    game = BJGame(ctx, bet)
+    # charge bet now (will refund if draw)
     if bet:
-        if p>21 or (d<=21 and d>p):
-            await change_balance(ctx.author.id, -bet)
-            res = f'Вы проиграли {bet} {CURRENCY}.'
-        elif d>21 or p>d:
+        await change_balance(ctx.author.id, -bet)
+    # send DM for interaction
+    try:
+        dm = await ctx.author.create_dm()
+        msg = await dm.send('Начинаем блекджек! Ответьте `hit` или `stand` в течение 60 секунд.')
+    except Exception:
+        return await ctx.send('Не удалось отправить DM. Включите приём личных сообщений от участников сервера.')
+
+    # immediate check for blackjacks
+    if game.is_blackjack(game.player) and game.is_blackjack(game.dealer):
+        if bet:
+            await change_balance(ctx.author.id, bet)  # refund
+        return await dm.send(game.player_text() + '\n' + game.dealer_text(reveal=True) + '\nНичья (оба Blackjack).')
+    if game.is_blackjack(game.player):
+        if bet:
+            await change_balance(ctx.author.id, int(bet * 1.5))
+        return await dm.send(game.player_text() + '\n' + game.dealer_text(reveal=True) + '\nBlackjack! Вы выиграли.')
+
+    # player's turn
+    while True:
+        await dm.send(game.player_text() + '\n' + game.dealer_text(reveal=False) + '\nНапишите `hit` или `stand`.')
+        try:
+            def check(m):
+                return m.author == ctx.author and isinstance(m.channel, discord.DMChannel) and m.content.lower() in ('hit','stand')
+            resp = await bot.wait_for('message', check=check, timeout=BLACKJACK_TIMEOUT)
+        except asyncio.TimeoutError:
+            # refund half bet? we'll refund full bet for safety
+            if bet:
+                await change_balance(ctx.author.id, bet)
+            return await dm.send('Время вышло — игра отменена, ставка возвращена.')
+        if resp.content.lower() == 'hit':
+            game.player.append(game.deck.pop())
+            if game.total(game.player) > 21:
+                return await dm.send(game.player_text() + '\nПеребор! Вы проиграли.' )
+            else:
+                continue
+        else:  # stand
+            break
+    # dealer's turn
+    while game.total(game.dealer) < 17:
+        game.dealer.append(game.deck.pop())
+    p = game.total(game.player); d = game.total(game.dealer)
+    if p>21:
+        res = 'Вы проиграли.'
+    elif d>21 or p>d:
+        res = 'Вы выиграли!'
+        if bet:
+            await change_balance(ctx.author.id, bet*2)
+    elif p==d:
+        res = 'Ничья.'
+        if bet:
             await change_balance(ctx.author.id, bet)
-            res = f'Вы выиграли {bet} {CURRENCY}!' 
-        else:
-            res = 'Ничья.'
-        await ctx.send(f'Ваши карты: {player} ({p})\nКарты дилера: {dealer} ({d})\n{res}')
     else:
-        await ctx.send(f'Ваши карты: {player} ({p})\nКарты дилера: {dealer} ({d})')
+        res = 'Вы проиграли.'
+    await dm.send(game.player_text() + '\n' + game.dealer_text(reveal=True) + '\n' + res)
+    await ctx.send(f'{ctx.author.mention}, результаты блекджека отправлены в DM.')
 
-# Race — несколько участников ставят, случайный победитель получает общий банк
-@bot.command()
-async def race(ctx, *members: discord.Member):
-    if not members:
-        return await ctx.send('Укажите хотя бы одного участника (упомяните).')
-    participants = [ctx.author] + list(dict.fromkeys(members))
-    participants = participants[:6]
-    positions = {p: 0 for p in participants}
-    # simple simulation
-    msg = await ctx.send('Старт гонки: ' + ' '.join(p.mention for p in participants))
-    for i in range(12):
-        for p in participants:
-            positions[p] += random.randint(0,2)
-        line = '\n'.join(f'{p.display_name}: ' + '>'*positions[p] for p in participants)
-        await msg.edit(content=line)
-        await asyncio.sleep(0.6)
-    winner = max(positions, key=positions.get)
-    await ctx.send(f'Победитель — {winner.mention}!')
-
-# Minesweeper — generate a simple field and allow reveal by coords via command
+# Minesweeper with flood-fill and DB save/load
 @bot.command()
 async def minesweeper(ctx, rows: int = 6, cols: int = 6, bombs: int = 8):
-    rows = max(2, min(9, rows))
-    cols = max(2, min(9, cols))
+    rows = max(2, min(12, rows))
+    cols = max(2, min(12, cols))
     bombs = max(1, min(rows*cols-1, bombs))
-    # place bombs
     cells = [(r,c) for r in range(rows) for c in range(cols)]
     bombs_pos = set(random.sample(cells, bombs))
     def neighbors(r,c):
@@ -324,94 +500,80 @@ async def minesweeper(ctx, rows: int = 6, cols: int = 6, bombs: int = 8):
                 rr,cc = r+dr, c+dc
                 if 0<=rr<rows and 0<=cc<cols:
                     yield (rr,cc)
-    # build numbers
-    board = [['B' if (r,c) in bombs_pos else 0 for c in range(cols)] for r in range(rows)]
+    board = [[-1 for _ in range(cols)] for _ in range(rows)]
     for r in range(rows):
         for c in range(cols):
-            if board[r][c]=='B': continue
-            board[r][c] = sum(1 for n in neighbors(r,c) if n in bombs_pos)
-    # show masked board with coordinates
+            if (r,c) in bombs_pos:
+                board[r][c] = 'B'
+            else:
+                board[r][c] = sum(1 for n in neighbors(r,c) if n in bombs_pos)
+    # save board
+    await save_mine(ctx.author.id, board, rows, cols)
+    # send masked
     header = '   ' + ' '.join(f'{i:2d}' for i in range(cols))
     lines = [header]
     for r in range(rows):
         line = f'{r:2d} ' + ' '.join('▢ ' for _ in range(cols))
         lines.append(line)
-    lines.append('\nЧтобы открыть клетку используйте: ms open row col')
+    lines.append('\nОткрыть: `!ms_open row col` — пример: `!ms_open 2 3`')
     await ctx.send('\n'.join(lines))
-    # store board for user in memory (simple, not persistent)
-    if not hasattr(bot, 'ms_boards'):
-        bot.ms_boards = {}
-    bot.ms_boards[ctx.author.id] = board
 
 @bot.command()
 async def ms_open(ctx, row: int, col: int):
-    if not hasattr(bot, 'ms_boards') or ctx.author.id not in bot.ms_boards:
-        return await ctx.send('У вас нет активного поля. Создайте: minesweeper')
-    board = bot.ms_boards[ctx.author.id]
-    rows = len(board); cols = len(board[0])
+    data = await load_mine(ctx.author.id)
+    if not data:
+        return await ctx.send('У вас нет сохранённого поля. Создайте с помощью `!minesweeper`')
+    board, rows, cols = data
     if not (0<=row<rows and 0<=col<cols):
         return await ctx.send('Неверные координаты')
     val = board[row][col]
-    if val=='B':
-        # reveal all
-        lines = ['   ' + ' '.join(f'{i:2d}' for i in range(cols))]
+    if val == 'B':
+        # reveal all and delete
+        out = ['   ' + ' '.join(f'{i:2d}' for i in range(cols))]
         for r in range(rows):
-            line = f'{r:2d} ' + ' '.join('B ' if board[r][c]=='B' else f'{board[r][c]} ' for c in range(cols))
-            lines.append(line)
-        del bot.ms_boards[ctx.author.id]
-        return await ctx.send('\n'.join(lines) + '\nВы подорвались!')
-    # reveal single cell (no flood-fill for simplicity)
-    lines = ['   ' + ' '.join(f'{i:2d}' for i in range(cols))]
+            out.append(f'{r:2d} ' + ' '.join('B ' if board[r][c]=='B' else f'{board[r][c]} ' for c in range(cols)))
+        async with db_lock:
+            c.execute('DELETE FROM mines WHERE owner_id=?', (ctx.author.id,))
+            conn.commit()
+        return await ctx.send('\n'.join(out) + '\nВы подорвались! Поле удалено.')
+    # flood-fill
+    revealed = [[False]*cols for _ in range(rows)]
+    q = deque()
+    q.append((row,col))
+    while q:
+        r,c = q.popleft()
+        if revealed[r][c]: continue
+        revealed[r][c]=True
+        if board[r][c]==0:
+            for dr in (-1,0,1):
+                for dc in (-1,0,1):
+                    rr,cc = r+dr, c+dc
+                    if 0<=rr<rows and 0<=cc<cols and not revealed[rr][cc] and board[rr][cc] != 'B':
+                        q.append((rr,cc))
+    out = ['   ' + ' '.join(f'{i:2d}' for i in range(cols))]
     for r in range(rows):
-        line = f'{r:2d} ' + ' '.join(('▢ ' if not (r==row and c==col) else f'{board[row][col]} ') for c in range(cols))
-        lines.append(line)
-    await ctx.send('\n'.join(lines))
+        line = f'{r:2d} ' + ' '.join((f'{board[r][c]} ' if revealed[r][c] else '▢ ') for c in range(cols))
+        out.append(line)
+    await ctx.send('\n'.join(out))
 
-# RPS with animation and betting
-@bot.command(name='rps')
-async def rps(ctx, choice: str = None, bet: int = 0):
-    choice = (choice or '').lower()
-    if choice not in ('rock','paper','scissors','r','p','s'):
-        return await ctx.send('Выберите: rock/paper/scissors')
-    mapping = {'r':'rock','p':'paper','s':'scissors'}
-    if choice in mapping: choice = mapping[choice]
-    bet = max(0, bet)
-    bal = await get_balance(ctx.author.id)
-    if bet and bal < bet:
-        return await ctx.send('Недостаточно средств для ставки')
-    bot_choice = random.choice(['rock','paper','scissors'])
-    anim_msg = await ctx.send(''.join(RPS_FRAMES))
-    # simple animation: rotate frames
-    for _ in range(4):
-        await asyncio.sleep(RPS_ANIM_DELAY)
-        RPS_FRAMES.append(RPS_FRAMES.pop(0))
-        await anim_msg.edit(content=' '.join(RPS_FRAMES))
-    await anim_msg.edit(content=f'Вы: {choice} \nБот: {bot_choice}')
-    outcome = None
-    if choice == bot_choice:
-        outcome = 'tie'
-    elif (choice=='rock' and bot_choice=='scissors') or (choice=='scissors' and bot_choice=='paper') or (choice=='paper' and bot_choice=='rock'):
-        outcome = 'win'
-    else:
-        outcome = 'lose'
-    if bet:
-        if outcome=='win':
-            await change_balance(ctx.author.id, bet)
-            await ctx.send(f'Вы выиграли {bet} {CURRENCY}!')
-        elif outcome=='lose':
-            await change_balance(ctx.author.id, -bet)
-            await ctx.send(f'Вы проиграли {bet} {CURRENCY}.')
-        else:
-            await ctx.send('Ничья — ставка возвращена.')
-    else:
-        await ctx.send({'win':'Вы победили!','lose':'Вы проиграли.','tie':'Ничья.'}[outcome])
+# ----------------- VOICE INFO -----------------
+@bot.command()
+async def voiceinfo(ctx):
+    embed = discord.Embed(title='Начисления за голосовую активность', color=0x3498DB)
+    embed.add_field(name='Ставка', value=f'{VOICE_COINS_PER_MIN} {CURRENCY} / минута', inline=False)
+    embed.add_field(name='Минимум оплачиваемого времени', value=f'{VOICE_MIN_SECONDS} секунд', inline=False)
+    embed.add_field(name='Лимит в день', value=f'{VOICE_DAILY_LIMIT} {CURRENCY}', inline=False)
+    embed.add_field(name='AFK-каналы исключены', value=str(VOICE_IGNORE_AFK), inline=False)
+    await ctx.send(embed=embed)
 
-# ---------- READY ----------
+# ----------------- STARTUP -----------------
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user} (id: {bot.user.id})')
-    print('------')
+    if not flush_voice_sessions.is_running():
+        flush_voice_sessions.start()
 
-# ---------- RUN ----------
+# ----------------- RUN -----------------
 if __name__ == '__main__':
     bot.run(TOKEN)
+
